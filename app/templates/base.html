@@ -37,10 +37,10 @@
     {% endif %}
 
     <dl class="row">
-      <dt class="col-sm-3 text-sm-end">Group(s):</dt>
+      <dt class="col-sm-3 text-sm-end">Base Group(s):</dt>
       <dd class="col-sm-9">
-        {% for g in s.groups %}
-        <a href="{{ url_for('group', group_name=g) }}">{{ g }}</a>{{ ", " if not loop.last else "" }}
+        {% for g in s.basegroups %}
+        <a href="{{ url_for('basegroups', group_name=g) }}">{{ g }}</a>{{ ", " if not loop.last else "" }}
         {% else %}
         -
         {% endfor %}
@@ -93,7 +93,7 @@
       <dd class="col-sm-9">
         <ul class="list-unstyled">
           {% for k, p in s.packages|dictsort(false) %}
-          <li><a href="{{ package_url(p) }}">{{ package_name(p) }}</a></li>
+          <li><a href="{{ package_url(p) }}">{{ p.name }}</a></li>
           {% endfor %}
         </ul>
       </dd>

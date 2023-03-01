@@ -1,16 +1,16 @@
 {% extends "layout.html" %}
-{% block title %}Group: {{ name }}{% endblock %}
+{% block title %}Virtual Package: {{ name }}{% endblock %}
 {% block inner_content %}
 
 <div class="card mb-3">
   <div class="card-header">
-    <h4 class="card-title">Group: <a href="{{ url_for('groups', group_name=name) }}">{{ name }}</a></h4>
-    <h6 class="card-subtitle mb-2 text-muted">{{ packages|length }} packages</h6>
+    <h4 class="card-title">Virtual Package: <a href="{{ url_for('package', package_name=name) }}">{{ name }}</a></h4>
+    <h6 class="card-subtitle mb-2 text-muted">Provided by {{ packages|length }} packages</h6>
   </div>
   <div class="card-body">
 
   {% if not packages %}
-    Group doesn't exist
+    Package doesn't exist
   {% else %}
   <dl class="row">
 
@@ -24,10 +24,10 @@
         </div>
       </dd>
 
-      <dt class="col-sm-3 text-sm-end">Packages:</dt>
+      <dt class="col-sm-3 text-sm-end">Provided By:</dt>
       <dd class="col-sm-9">
         <ul class="list-unstyled">
-        {% for p in packages %}
+        {% for s, p in packages %}
           <li><a href="{{ package_url(p) }}">{{ p.name }}</a></li>
         {% endfor %}
         </ul>

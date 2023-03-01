@@ -12,6 +12,7 @@ from enum import Enum
 from functools import cmp_to_key
 from urllib.parse import quote_plus, quote
 from typing import List, Set, Dict, Tuple, Optional, Type, Sequence, NamedTuple, Any
+from pydantic import BaseModel, Field
 
 from .appconfig import REPOSITORIES
 from .utils import vercmp, version_is_newer_than, extract_upstream_version, split_depends, \
@@ -60,42 +61,10 @@ def get_repositories() -> List[Repository]:
     return l
 
 
-def is_skipped(name: str) -> bool:
-    skipped = state.external_mapping.skipped
-    for pattern in skipped:
-        if re.fullmatch(pattern, name, flags=re.IGNORECASE) is not None:
-            return True
-    return False
+def get_realname_variants(s: Source) -> List[str]:
+    """Returns a list of potential names used by external systems, highest priority first"""
 
-
-def get_arch_names(name: str) -> List[str]:
-    mapping = state.external_mapping.mapping
-    names: List[str] = []
-
-    def add(n: str) -> None:
-        if n not in names:
-            names.append(n)
-
-    name = name.lower()
-
-    if is_skipped(name):
-        return []
-
-    for pattern, repl in mapping.items():
-        new = re.sub("^" + pattern + "$", repl, name, flags=re.IGNORECASE)
-        if new != name:
-            add(new)
-            break
-
-    add(name)
-
-    return names
-
-
-def get_arch_info_for_base(s: Source) -> Optional[Tuple[str, str, int]]:
-    """tuple or None"""
-
-    global state
+    main = [s.realname, s.realname.lower()]
 
     package_variants = [p.realname for p in s.packages.values()]
 
@@ -104,11 +73,50 @@ def get_arch_info_for_base(s: Source) -> Optional[Tuple[str, str, int]]:
     for p in s.packages.values():
         provides_variants.extend(p.realprovides.keys())
 
-    variants = [s.realname] + sorted(package_variants) + sorted(provides_variants)
+    return main + sorted(package_variants) + sorted(provides_variants)
+
+
+def get_arch_info_for_base(s: Source) -> Optional[ExtInfo]:
+    global state
+
+    if "archlinux" in s.pkgmeta.references:
+        mapped = s.pkgmeta.references["archlinux"]
+        if mapped is None:
+            return None
+        variants = [mapped]
+    else:
+        variants = get_realname_variants(s)
+
+    for arch_name in variants:
+        if arch_name in state.arch_versions:
+            arch_info = state.arch_versions[arch_name]
+            version = arch_info[0]
+            url = arch_info[1]
+            return ExtInfo("Arch Linux", version, arch_info[2], url, [])
+
+    return None
+
+
+def get_cygwin_info_for_base(s: Source) -> Optional[ExtInfo]:
+    global state
+
+    # XXX: we only care about msys packages here
+    if s.name != s.realname:
+        return None
+
+    if "cygwin" in s.pkgmeta.references:
+        mapped = s.pkgmeta.references["cygwin"]
+        if mapped is None:
+            return None
+        variants = [mapped]
+    else:
+        variants = get_realname_variants(s)
+
     for realname in variants:
-        for arch_name in get_arch_names(realname):
-            if arch_name in state.arch_versions:
-                return state.arch_versions[arch_name]
+        if realname in state.cygwin_versions:
+            info = state.cygwin_versions[realname]
+            return ExtInfo("Cygwin", info[0], 0, info[1], [info[2]])
+
     return None
 
 
@@ -126,11 +134,21 @@ def cleanup_files(files: List[str]) -> List[str]:
     return result[::-1]
 
 
+def get_base_group_name(p: Package, group_name: str) -> str:
+    """Given a package and a group it is part of, return the base group name the groups is part of"""
+
+    if group_name.startswith(p.package_prefix):
+        return p.base_prefix + group_name[len(p.package_prefix):]
+    return group_name
+
+
 class Repository:
 
-    def __init__(self, name: str, variant: str, url: str, download_url: str, src_url: str):
+    def __init__(self, name: str, variant: str, package_prefix: str, base_prefix: str, url: str, download_url: str, src_url: str):
         self.name = name
         self.variant = variant
+        self.package_prefix = package_prefix
+        self.base_prefix = base_prefix
         self.url = url
         self.download_url = download_url
         self.src_url = src_url
@@ -159,19 +177,36 @@ class Repository:
         return sum(int(p.isize) for p in self.packages)
 
 
-class ExternalMapping:
+class PkgMetaEntry(BaseModel):
 
-    mapping: Dict[str, str]
-    skipped: Set[str]
+    internal: bool = Field(default=False)
+    """If the package is MSYS2 internal or just a meta package"""
 
-    def __init__(self, json_object: Optional[Dict] = None) -> None:
-        if json_object is None:
-            json_object = {}
-        self.mapping = json_object.get("mapping", {})
-        self.skipped = set(json_object.get("skipped", []))
+    references: Dict[str, str] = Field(default_factory=dict)
+    """References to third party repositories"""
 
 
-BuildStatus = Dict[str, Dict[str, Dict[str, Any]]]
+class PkgMeta(BaseModel):
+
+    packages: Dict[str, PkgMetaEntry]
+    """A mapping of pkgbase names to PkgMetaEntry"""
+
+
+class BuildStatusBuild(BaseModel):
+    desc: Optional[str]
+    status: str
+    urls: Dict[str, str]
+
+
+class BuildStatusPackage(BaseModel):
+    name: str
+    version: str
+    builds: Dict[str, BuildStatusBuild]
+
+
+class BuildStatus(BaseModel):
+    packages: List[BuildStatusPackage] = []
+    cycles: List[Tuple[str, str]] = []
 
 
 class AppState:
@@ -184,10 +219,10 @@ class AppState:
         self._last_update = 0.0
         self._sources: Dict[str, Source] = {}
         self._sourceinfos: Dict[str, SrcInfoPackage] = {}
+        self._pkgmeta: PkgMeta = PkgMeta(packages={})
         self._arch_versions: Dict[str, Tuple[str, str, int]] = {}
-        self._external_mapping: ExternalMapping = ExternalMapping()
         self._cygwin_versions: CygwinVersions = {}
-        self._build_status: BuildStatus = {}
+        self._build_status: BuildStatus = BuildStatus()
         self._update_etag()
 
     def _update_etag(self) -> None:
@@ -221,21 +256,21 @@ class AppState:
         self._update_etag()
 
     @property
+    def pkgmeta(self) -> PkgMeta:
+        return self._pkgmeta
+
+    @pkgmeta.setter
+    def pkgmeta(self, pkgmeta: PkgMeta) -> None:
+        self._pkgmeta = pkgmeta
+        self._update_etag()
+
+    @property
     def arch_versions(self) -> Dict[str, Tuple[str, str, int]]:
         return self._arch_versions
 
     @arch_versions.setter
     def arch_versions(self, versions: Dict[str, Tuple[str, str, int]]) -> None:
         self._arch_versions = versions
-        self._update_etag()
-
-    @property
-    def external_mapping(self) -> ExternalMapping:
-        return self._external_mapping
-
-    @external_mapping.setter
-    def external_mapping(self, external_mapping: ExternalMapping) -> None:
-        self._external_mapping = external_mapping
         self._update_etag()
 
     @property
@@ -257,15 +292,12 @@ class AppState:
         self._update_etag()
 
 
-def repo_is_mingw(repo_key: str) -> bool:
-    return repo_key != "msys"
-
-
 class Package:
 
     def __init__(self, builddate: str, csize: str, depends: List[str], filename: str, files: List[str], isize: str,
                  makedepends: List[str], md5sum: str, name: str, pgpsig: str, sha256sum: str, arch: str,
-                 base_url: str, repo: str, repo_variant: str, provides: List[str], conflicts: List[str], replaces: List[str],
+                 base_url: str, repo: str, repo_variant: str, package_prefix: str, base_prefix: str,
+                 provides: List[str], conflicts: List[str], replaces: List[str],
                  version: str, base: str, desc: str, groups: List[str], licenses: List[str], optdepends: List[str],
                  checkdepends: List[str], sig_data: str, url: str, packager: str) -> None:
         self.builddate = int(builddate)
@@ -286,6 +318,8 @@ class Package:
         self.fileurl = base_url + "/" + quote(self.filename)
         self.repo = repo
         self.repo_variant = repo_variant
+        self.package_prefix = package_prefix
+        self.base_prefix = base_prefix
         self.provides = split_depends(provides)
         self.conflicts = split_depends(conflicts)
         self.replaces = split_depends(replaces)
@@ -297,6 +331,7 @@ class Package:
         self.rdepends: Dict[Package, Set[DepType]] = {}
         self.optdepends = split_optdepends(optdepends)
         self.packager = parse_packager(packager)
+        self.provided_by: Set[Package] = set()
 
     @property
     def files(self) -> Sequence[str]:
@@ -309,15 +344,15 @@ class Package:
     def realprovides(self) -> Dict[str, Set[str]]:
         prov = {}
         for key, infos in self.provides.items():
-            if repo_is_mingw(self.repo) and key.startswith("mingw-w64-"):
-                key = key.split("-", 3)[-1]
+            if key.startswith(self.package_prefix):
+                key = key[len(self.package_prefix):]
             prov[key] = infos
         return prov
 
     @property
     def realname(self) -> str:
-        if repo_is_mingw(self.repo):
-            return strip_vcs(self.name.split("-", 3)[-1])
+        if self.name.startswith(self.package_prefix):
+            return strip_vcs(self.name[len(self.package_prefix):])
         return strip_vcs(self.name)
 
     @property
@@ -327,19 +362,43 @@ class Package:
         return ""
 
     @property
+    def repo_url(self) -> str:
+        if self.name in state.sourceinfos:
+            return state.sourceinfos[self.name].repo_url
+        for repo in get_repositories():
+            if repo.name == self.repo:
+                return repo.src_url
+        return ""
+
+    @property
+    def repo_path(self) -> str:
+        if self.name in state.sourceinfos:
+            return state.sourceinfos[self.name].repo_path
+        return self.base
+
+    @property
+    def history_url(self) -> str:
+        return self.repo_url + ("/commits/master/" + quote(self.repo_path))
+
+    @property
+    def source_url(self) -> str:
+        return self.repo_url + ("/tree/master/" + quote(self.repo_path))
+
+    @property
     def key(self) -> PackageKey:
         return (self.repo, self.repo_variant,
                 self.name, self.arch, self.fileurl)
 
     @classmethod
-    def from_desc(cls: Type[Package], d: Dict[str, List[str]], base: str, base_url: str, repo: str, repo_variant: str) -> Package:
+    def from_desc(cls: Type[Package], d: Dict[str, List[str]], base: str, repo: Repository) -> Package:
         return cls(d["%BUILDDATE%"][0], d["%CSIZE%"][0],
                    d.get("%DEPENDS%", []), d["%FILENAME%"][0],
                    d.get("%FILES%", []), d["%ISIZE%"][0],
                    d.get("%MAKEDEPENDS%", []),
                    d["%MD5SUM%"][0], d["%NAME%"][0],
                    d.get("%PGPSIG%", [""])[0], d["%SHA256SUM%"][0],
-                   d["%ARCH%"][0], base_url, repo, repo_variant,
+                   d["%ARCH%"][0], repo.download_url, repo.name, repo.variant,
+                   repo.package_prefix, repo.base_prefix,
                    d.get("%PROVIDES%", []), d.get("%CONFLICTS%", []),
                    d.get("%REPLACES%", []), d["%VERSION%"][0], base,
                    d.get("%DESC%", [""])[0], d.get("%GROUPS%", []),
@@ -382,6 +441,13 @@ class Source:
         return sorted(groups)
 
     @property
+    def basegroups(self) -> List[str]:
+        groups: Set[str] = set()
+        for p in self.packages.values():
+            groups.update(get_base_group_name(p, g) for g in p.groups)
+        return sorted(groups)
+
+    @property
     def version(self) -> str:
         # get the newest version
         versions: Set[str] = set([p.version for p in self.packages.values()])
@@ -411,20 +477,27 @@ class Source:
         return version or ""
 
     @property
+    def pkgmeta(self) -> PkgMetaEntry:
+        global state
+
+        return state.pkgmeta.packages.get(self.name, PkgMetaEntry())
+
+    @property
     def external_infos(self) -> Sequence[ExtInfo]:
         global state
+
+        # internal package, don't try to link it
+        if self.pkgmeta.internal:
+            return []
 
         ext = []
         arch_info = get_arch_info_for_base(self)
         if arch_info is not None:
-            version = arch_info[0]
-            url = arch_info[1]
-            ext.append(ExtInfo("Arch Linux", version, arch_info[2], url, []))
+            ext.append(arch_info)
 
-        cygwin_versions = state.cygwin_versions
-        if self.name in cygwin_versions:
-            info = cygwin_versions[self.name]
-            ext.append(ExtInfo("Cygwin", info[0], 0, info[1], [info[2]]))
+        cygwin_info = get_cygwin_info_for_base(self)
+        if cygwin_info is not None:
+            ext.append(cygwin_info)
 
         return sorted(ext)
 
@@ -439,8 +512,8 @@ class Source:
 
     @property
     def realname(self) -> str:
-        if not self._package.repo.startswith("msys"):
-            return strip_vcs(self.name.split("-", 2)[-1])
+        if self.name.startswith(self._package.base_prefix):
+            return strip_vcs(self.name[len(self._package.base_prefix):])
         return strip_vcs(self.name)
 
     @property
@@ -451,28 +524,19 @@ class Source:
 
     @property
     def repo_url(self) -> str:
-        for p in self.packages.values():
-            if p.name in state.sourceinfos:
-                return state.sourceinfos[p.name].repo_url
-            for repo in get_repositories():
-                if repo.name == p.repo:
-                    return repo.src_url
-        return ""
+        return self._package.repo_url
 
     @property
     def repo_path(self) -> str:
-        for p in self.packages.values():
-            if p.name in state.sourceinfos:
-                return state.sourceinfos[p.name].repo_path
-        return self.name
+        return self._package.repo_path
 
     @property
     def source_url(self) -> str:
-        return self.repo_url + ("/tree/master/" + quote(self.repo_path))
+        return self._package.source_url
 
     @property
     def history_url(self) -> str:
-        return self.repo_url + ("/commits/master/" + quote(self.repo_path))
+        return self._package.history_url
 
     @property
     def filebug_url(self) -> str:
@@ -485,12 +549,12 @@ class Source:
             "/issues?q=" + quote_plus("is:issue is:open %s" % self.realname))
 
     @classmethod
-    def from_desc(cls, d: Dict[str, List[str]], repo: str) -> "Source":
+    def from_desc(cls, d: Dict[str, List[str]], repo: Repository) -> "Source":
 
         name = d["%NAME%"][0]
         if "%BASE%" not in d:
-            if repo_is_mingw(repo):
-                base = "mingw-w64-" + name.split("-", 3)[-1]
+            if name.startswith(repo.package_prefix):
+                base = name[len(repo.package_prefix):]
             else:
                 base = name
         else:
@@ -498,9 +562,8 @@ class Source:
 
         return cls(base)
 
-    def add_desc(self, d: Dict[str, List[str]], base_url: str, repo: str, repo_variant: str) -> None:
-        p = Package.from_desc(
-            d, self.name, base_url, repo, repo_variant)
+    def add_desc(self, d: Dict[str, List[str]], repo: Repository) -> None:
+        p = Package.from_desc(d, self.name, repo)
         assert p.key not in self.packages
         self.packages[p.key] = p
 

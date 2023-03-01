@@ -10,28 +10,42 @@ import traceback
 import hashlib
 import functools
 import gzip
+import yaml
+import datetime
 from asyncio import Event
 from urllib.parse import urlparse, quote_plus
-from typing import Any, Dict, Tuple, List, Set
+from typing import Any, Dict, Tuple, List, Set, Optional
+from email.utils import parsedate_to_datetime
 
 import httpx
 from aiolimiter import AsyncLimiter
 import zstandard
 
-from .appstate import state, Source, CygwinVersions, ExternalMapping, get_repositories, SrcInfoPackage, Package, DepType
-from .appconfig import CYGWIN_METADATA_URL, REQUEST_TIMEOUT, AUR_METADATA_URL, ARCH_REPO_CONFIG, EXTERNAL_MAPPING_URL, \
-    SRCINFO_URLS, UPDATE_INTERVAL, BUILD_STATUS_URL, UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL
+from .appstate import state, Source, CygwinVersions, get_repositories, SrcInfoPackage, Package, DepType, Repository, BuildStatus, PkgMeta
+from .appconfig import CYGWIN_METADATA_URL, REQUEST_TIMEOUT, AUR_METADATA_URL, ARCH_REPO_CONFIG, PKGMETA_URLS, \
+    SRCINFO_URLS, UPDATE_INTERVAL, BUILD_STATUS_URLS, UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL
 from .utils import version_is_newer_than, arch_version_to_msys, extract_upstream_version
 from . import appconfig
 from .exttarfile import ExtTarFile
 
 
-async def get_content_cached(url: str, *args: Any, **kwargs: Any) -> bytes:
+def get_mtime_for_response(response: httpx.Response) -> Optional[datetime.datetime]:
+    last_modified = response.headers.get("last-modified")
+    if last_modified is not None:
+        dt: datetime.datetime = parsedate_to_datetime(last_modified)
+        return dt.astimezone(datetime.timezone.utc)
+    return None
+
+
+async def get_content_cached_mtime(url: str, *args: Any, **kwargs: Any) -> Tuple[bytes, Optional[datetime.datetime]]:
+    """Returns the content of the URL response, and a datetime object for when the content was last modified"""
+
+    # cache the file locally, and store the "last-modified" date as the file mtime
     cache_dir = appconfig.CACHE_DIR
     if cache_dir is None:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             r = await client.get(url, *args, **kwargs)
-            return r.content
+            return (r.content, get_mtime_for_response(r))
 
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -46,9 +60,18 @@ async def get_content_cached(url: str, *args: Any, **kwargs: Any) -> bytes:
             r = await client.get(url, *args, **kwargs)
             with open(fn, "wb") as h:
                 h.write(r.content)
+            mtime = get_mtime_for_response(r)
+            if mtime is not None:
+                os.utime(fn, (mtime.timestamp(), mtime.timestamp()))
+
     with open(fn, "rb") as h:
         data = h.read()
-    return data
+    file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fn), datetime.timezone.utc)
+    return (data, file_mtime)
+
+
+async def get_content_cached(url: str, *args: Any, **kwargs: Any) -> bytes:
+    return (await get_content_cached_mtime(url, *args, **kwargs))[0]
 
 
 def parse_cygwin_versions(base_url: str, data: bytes) -> CygwinVersions:
@@ -58,17 +81,24 @@ def parse_cygwin_versions(base_url: str, data: bytes) -> CygwinVersions:
     source_package = None
     versions: CygwinVersions = {}
     base_url = base_url.rsplit("/", 2)[0]
+    in_main = True
     for line in data.decode("utf-8").splitlines():
+        if line.startswith("@"):
+            in_main = True
         if line.startswith("version:"):
             version = line.split(":")[-1].strip().split("-", 1)[0].split("+", 1)[0]
-        elif line.startswith("source:"):
+        elif in_main and line.startswith("source:"):
+            in_main = False
             source = line.split(":", 1)[-1].strip()
             fn = source.rsplit(None, 2)[0]
             source_package = fn.rsplit("/")[-1].rsplit("-", 3)[0]
             src_url = base_url + "/" + fn
             assert version is not None
-            if source_package not in versions:
-                versions[source_package] = (version, "https://cygwin.com/packages/summary/%s-src.html" % source_package, src_url)
+            if source_package in versions:
+                existing_version = versions[source_package][0]
+                if not version_is_newer_than(version, existing_version):
+                    continue
+            versions[source_package] = (version, "https://cygwin.com/packages/summary/%s-src.html" % source_package, src_url)
     return versions
 
 
@@ -85,14 +115,22 @@ async def update_cygwin_versions() -> None:
 
 
 async def update_build_status() -> None:
-    url = BUILD_STATUS_URL
-    if not await check_needs_update([url]):
+    urls = BUILD_STATUS_URLS
+    if not await check_needs_update(urls):
         return
 
     print("update build status")
-    print("Loading %r" % url)
-    data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
-    state.build_status = json.loads(data)
+    responses = []
+    for url in urls:
+        print("Loading %r" % url)
+        data, mtime = await get_content_cached_mtime(url, timeout=REQUEST_TIMEOUT)
+        print("Done: %r, %r" % (url, str(mtime)))
+        responses.append((mtime, url, data))
+
+    # use the newest of all status summaries
+    newest = sorted(responses)[-1]
+    print("Selected: %r" % (newest[1],))
+    state.build_status = BuildStatus.parse_raw(newest[2])
 
 
 def parse_desc(t: str) -> Dict[str, List[str]]:
@@ -114,20 +152,20 @@ def parse_desc(t: str) -> Dict[str, List[str]]:
     return d
 
 
-async def parse_repo(repo: str, repo_variant: str, files_url: str, download_url: str) -> Dict[str, Source]:
+async def parse_repo(repo: Repository) -> Dict[str, Source]:
     sources: Dict[str, Source] = {}
-    print("Loading %r" % files_url)
+    print("Loading %r" % repo.files_url)
 
-    def add_desc(d: Any, download_url: str) -> None:
+    def add_desc(d: Any) -> None:
         source = Source.from_desc(d, repo)
         if source.name not in sources:
             sources[source.name] = source
         else:
             source = sources[source.name]
 
-        source.add_desc(d, download_url, repo, repo_variant)
+        source.add_desc(d, repo)
 
-    data = await get_content_cached(files_url, timeout=REQUEST_TIMEOUT)
+    data = await get_content_cached(repo.files_url, timeout=REQUEST_TIMEOUT)
 
     with io.BytesIO(data) as f:
         with ExtTarFile.open(fileobj=f, mode="r") as tar:
@@ -151,7 +189,7 @@ async def parse_repo(repo: str, repo_variant: str, files_url: str, download_url:
             elif name.endswith("/files"):
                 t += data.decode("utf-8")
         desc = parse_desc(t)
-        add_desc(desc, download_url)
+        add_desc(desc)
 
     return sources
 
@@ -166,7 +204,9 @@ async def update_arch_versions() -> None:
     awaitables = []
     for (url, repo) in ARCH_REPO_CONFIG:
         download_url = url.rsplit("/", 1)[0]
-        awaitables.append(parse_repo(repo, "", url, download_url))
+        awaitables.append(parse_repo(Repository(repo, "", "", "", download_url, download_url, "")))
+
+    # priority: real packages > real provides > aur packages > aur provides
 
     for sources in (await asyncio.gather(*awaitables)):
         for source in sources.values():
@@ -191,12 +231,22 @@ async def update_arch_versions() -> None:
             else:
                 arch_versions[source.name] = (version, url, source.date)
 
+            # use provides as fallback
+            for p in source.packages.values():
+                url = "https://www.archlinux.org/packages/%s/%s/%s/" % (
+                    p.repo, p.arch, p.name)
+
+                for provides in sorted(p.provides.keys()):
+                    if provides not in arch_versions:
+                        arch_versions[provides] = (version, url, p.builddate)
+
     print("done")
 
     print("update versions from AUR")
     r = await get_content_cached(AUR_METADATA_URL,
                                  timeout=REQUEST_TIMEOUT)
-    for item in json.loads(r):
+    items = json.loads(r)
+    for item in items:
         name = item["Name"]
         # We use AUR as a fallback only, since it might contain development builds
         if name in arch_versions:
@@ -206,6 +256,17 @@ async def update_arch_versions() -> None:
         last_modified = item["LastModified"]
         url = "https://aur.archlinux.org/packages/%s" % name
         arch_versions[name] = (msys_ver, url, last_modified)
+
+    for item in items:
+        name = item["Name"]
+        for provides in sorted(item.get("Provides", [])):
+            if provides in arch_versions:
+                continue
+            version = item["Version"]
+            msys_ver = extract_upstream_version(arch_version_to_msys(version))
+            last_modified = item["LastModified"]
+            url = "https://aur.archlinux.org/packages/%s" % name
+            arch_versions[provides] = (msys_ver, url, last_modified)
 
     print("done")
     state.arch_versions = arch_versions
@@ -251,7 +312,7 @@ async def update_source() -> None:
     final: Dict[str, Source] = {}
     awaitables = []
     for repo in get_repositories():
-        awaitables.append(parse_repo(repo.name, repo.variant, repo.files_url, repo.download_url))
+        awaitables.append(parse_repo(repo))
     for sources in await asyncio.gather(*awaitables):
         for name, source in sources.items():
             if name in final:
@@ -260,6 +321,7 @@ async def update_source() -> None:
                 final[name] = source
 
     fill_rdepends(final)
+    fill_provided_by(final)
     state.sources = final
 
 
@@ -284,6 +346,21 @@ async def update_sourceinfos() -> None:
                     result[pkg.pkgname] = pkg
 
     state.sourceinfos = result
+
+
+async def update_pkgmeta() -> None:
+    urls = PKGMETA_URLS
+    if not await check_needs_update(urls):
+        return
+
+    print("update pkgmeta")
+    merged = PkgMeta(packages={})
+    for url in urls:
+        print("Loading %r" % url)
+        data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
+        merged.packages.update(PkgMeta.parse_obj(yaml.safe_load(data)).packages)
+
+    state.pkgmeta = merged
 
 
 def fill_rdepends(sources: Dict[str, Source]) -> None:
@@ -313,14 +390,17 @@ def fill_rdepends(sources: Dict[str, Source]) -> None:
             p.rdepends = merged
 
 
-async def update_external_mapping() -> None:
-    url = EXTERNAL_MAPPING_URL
-    if not await check_needs_update([url]):
-        return
-    print("update external mapping")
-    print("Loading %r" % url)
-    data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
-    state.external_mapping = ExternalMapping(json.loads(data))
+def fill_provided_by(sources: Dict[str, Source]) -> None:
+
+    provided_by: Dict[str, Set[Package]] = {}
+    for s in sources.values():
+        for p in s.packages.values():
+            for provides in p.provides.keys():
+                provided_by.setdefault(provides, set()).add(p)
+    for s in sources.values():
+        for p in s.packages.values():
+            if p.name in provided_by:
+                p.provided_by = provided_by[p.name]
 
 
 _rate_limit = AsyncLimiter(UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL)
@@ -356,7 +436,7 @@ async def update_loop() -> None:
             print("check for updates")
             try:
                 awaitables = [
-                    update_external_mapping(),
+                    update_pkgmeta(),
                     update_cygwin_versions(),
                     update_arch_versions(),
                     update_source(),

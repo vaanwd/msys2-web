@@ -20,7 +20,7 @@ from fastapi_etag import Etag
 from fastapi.staticfiles import StaticFiles
 from fastapi_etag import add_exception_handler as add_etag_exception_handler
 
-from .appstate import state, get_repositories, Package, is_skipped, Source, DepType, SrcInfoPackage
+from .appstate import state, get_repositories, Package, Source, DepType, SrcInfoPackage, get_base_group_name
 from .appconfig import DEFAULT_REPO
 from .utils import extract_upstream_version, version_is_newer_than
 
@@ -83,7 +83,7 @@ def update_timestamp(request: Request) -> float:
 
 
 @context_function("package_url")
-def package_url(request: Request, package: Package, name: str = None) -> str:
+def package_url(request: Request, package: Package, name: Optional[str] = None) -> str:
     res: str = ""
     if name is None:
         res = request.url_for("package", package_name=name or package.name)
@@ -148,13 +148,6 @@ def licenses_to_html(request: Request, licenses: List[str]) -> str:
     return " OR ".join(done)
 
 
-@context_function("package_name")
-def package_name(request: Request, package: Package, name: str = None) -> str:
-    name = name or package.name
-    name = re.split("[<>=]+", name, 1)[0]
-    return (name or package.name)
-
-
 @template_filter("rdepends_type")
 def rdepends_type(types: Set[DepType]) -> List[str]:
     if list(types) == [DepType.NORMAL]:
@@ -195,6 +188,15 @@ def filter_filesize(d: int) -> str:
         return "%.2f MB" % (d / (1024 ** 2))
 
 
+@router.get('/robots.txt')
+async def robots() -> Response:
+    data = """\
+User-agent: *
+Disallow: /search?*
+    """
+    return Response(content=data, media_type='text/plain')
+
+
 @router.get('/repos', dependencies=[Depends(Etag(get_etag))])
 async def repos(request: Request, response: Response) -> Response:
     return templates.TemplateResponse("repos.html", {"request": request, "repos": get_repositories()}, headers=dict(response.headers))
@@ -217,7 +219,7 @@ async def index(request: Request, response: Response) -> Response:
 
 @router.get('/base', dependencies=[Depends(Etag(get_etag))])
 @router.get('/base/{base_name}', dependencies=[Depends(Etag(get_etag))])
-async def base(request: Request, response: Response, base_name: str = None) -> Response:
+async def base(request: Request, response: Response, base_name: Optional[str] = None) -> Response:
     global state
 
     if base_name is not None:
@@ -239,6 +241,15 @@ async def base(request: Request, response: Response, base_name: str = None) -> R
 @router.get('/group/', dependencies=[Depends(Etag(get_etag))])
 @router.get('/group/{group_name}', dependencies=[Depends(Etag(get_etag))])
 async def group(request: Request, response: Response, group_name: Optional[str] = None) -> Response:
+    params = {}
+    if group_name is not None:
+        params['group_name'] = group_name
+    return RedirectResponse(request.url_for('groups', **params), headers=dict(response.headers))
+
+
+@router.get('/groups/', dependencies=[Depends(Etag(get_etag))])
+@router.get('/groups/{group_name}', dependencies=[Depends(Etag(get_etag))])
+async def groups(request: Request, response: Response, group_name: Optional[str] = None) -> Response:
     global state
 
     if group_name is not None:
@@ -262,6 +273,39 @@ async def group(request: Request, response: Response, group_name: Optional[str] 
         return templates.TemplateResponse('groups.html', {
             "request": request,
             "groups": groups,
+        }, headers=dict(response.headers))
+
+
+@router.get('/basegroups/', dependencies=[Depends(Etag(get_etag))])
+@router.get('/basegroups/{group_name}', dependencies=[Depends(Etag(get_etag))])
+async def basegroups(request: Request, response: Response, group_name: Optional[str] = None) -> Response:
+    global state
+
+    if group_name is not None:
+        groups: Dict[str, int] = {}
+        for s in state.sources.values():
+            for k, p in sorted(s.packages.items()):
+                for name in p.groups:
+                    base_name = get_base_group_name(p, name)
+                    if base_name == group_name:
+                        groups[name] = groups.get(name, 0) + 1
+
+        return templates.TemplateResponse("basegroup.html", {
+            "request": request,
+            "name": group_name,
+            "groups": groups,
+        }, headers=dict(response.headers))
+    else:
+        base_groups: Dict[str, Set[str]] = {}
+        for s in state.sources.values():
+            for k, p in sorted(s.packages.items()):
+                for name in p.groups:
+                    base_name = get_base_group_name(p, name)
+                    base_groups.setdefault(base_name, set()).add(name)
+
+        return templates.TemplateResponse('basegroups.html', {
+            "request": request,
+            "base_groups": base_groups,
         }, headers=dict(response.headers))
 
 
@@ -304,13 +348,17 @@ async def package(request: Request, response: Response, package_name: str, repo:
                         else:
                             provides.append((s, p))
 
-    # show the real package always first
-    packages.extend(provides)
-
-    return templates.TemplateResponse("package.html", {
-        "request": request,
-        "packages": packages,
-    }, headers=dict(response.headers))
+    if packages:
+        return templates.TemplateResponse("package.html", {
+            "request": request,
+            "packages": packages,
+        }, headers=dict(response.headers))
+    else:
+        return templates.TemplateResponse("packagevirtual.html", {
+            "request": request,
+            "name": package_name,
+            "packages": provides,
+        }, headers=dict(response.headers))
 
 
 @router.get('/updates', dependencies=[Depends(Etag(get_etag))])
@@ -367,7 +415,6 @@ async def outofdate(request: Request, response: Response, related: Optional[str]
     repos = get_repositories()
 
     missing = []
-    skipped = []
     to_update = []
     all_sources = []
 
@@ -380,6 +427,9 @@ async def outofdate(request: Request, response: Response, related: Optional[str]
 
     for s in state.sources.values():
         all_sources.append(s)
+
+        if s.pkgmeta.internal:
+            continue
 
         if related_depends:
             for p in s.packages.values():
@@ -404,24 +454,19 @@ async def outofdate(request: Request, response: Response, related: Optional[str]
                 break
 
         if not external_infos:
-            if is_skipped(s.name):
-                skipped.append(s)
-            else:
-                missing.append((s, s.realname))
+            missing.append(s)
 
     # show packages which have recently been build first.
     # assumes high frequency update packages are more important
     to_update.sort(key=lambda i: (i[-1], i[0].name), reverse=True)
 
-    missing.sort(key=lambda i: i[0].date, reverse=True)
-    skipped.sort(key=lambda i: i.name)
+    missing.sort(key=lambda i: i.date, reverse=True)
 
     return templates.TemplateResponse("outofdate.html", {
         "request": request,
         "all_sources": all_sources,
         "to_update": to_update,
         "missing": missing,
-        "skipped": skipped,
         "related": related or "",
         "repos": repos,
         "repo_filter": repo_filter,
@@ -511,25 +556,33 @@ def get_build_status(srcinfo: SrcInfoPackage, repo_list: Set[str] = set()) -> Li
     for repo in repo_list:
         build_types.update(repo_to_builds(repo))
 
-    all_status = build_status.get(srcinfo.pkgbase, {})
+    entry = None
+    for package in build_status.packages:
+        if package.name == srcinfo.pkgbase and package.version == srcinfo.build_version:
+            entry = package
+            break
+
     results = []
-    for build_type, status in sorted(all_status.items(), key=lambda i: get_status_priority(i[1]["status"]), reverse=True):
-        status_key = status.get("status", "unknown")
-        if status.get("version") != srcinfo.build_version:
-            continue
-        if build_types and build_type not in build_types:
-            continue
-        results.append(
-            PackageBuildStatus(
-                build_type, get_status_text(status_key),
-                status.get("desc", ""), status.get("urls", {}),
-                get_status_category(status_key))
-        )
+    if entry is not None:
+        for build_type, status in sorted(entry.builds.items(), key=lambda i: get_status_priority(i[1].status), reverse=True):
+            status_key = status.status
+            if build_types and build_type not in build_types:
+                continue
+            results.append(
+                PackageBuildStatus(
+                    build_type, get_status_text(status_key),
+                    status.desc or "", status.urls,
+                    get_status_category(status_key))
+            )
 
     if not results:
-        key = "unknown"
-        results.append(
-            PackageBuildStatus(key, get_status_text(key), "", {}, get_status_category(key)))
+        build_types = set()
+        for repo in repo_list:
+            build_types.update(repo_to_builds(repo))
+        for build in sorted(build_types):
+            key = "unknown"
+            results.append(
+                PackageBuildStatus(build, get_status_text(key), "", {}, get_status_category(key)))
 
     return results
 
@@ -555,7 +608,8 @@ async def queue(request: Request, response: Response, repo: str = "") -> Respons
                 if version_is_newer_than(srcinfo.build_version, p.version):
                     srcinfo_repos.setdefault(srcinfo.pkgbase, set()).add(srcinfo.repo)
                     repo_list = srcinfo_repos[srcinfo.pkgbase] if not repo_filter else set([repo_filter])
-                    grouped[srcinfo.pkgbase] = (srcinfo, s, p, get_build_status(srcinfo, repo_list))
+                    new_src = state.sources.get(srcinfo.pkgbase)
+                    grouped[srcinfo.pkgbase] = (srcinfo, new_src, p, get_build_status(srcinfo, repo_list))
 
     # new packages
     available: Dict[str, List[SrcInfoPackage]] = {}
@@ -594,7 +648,7 @@ async def queue(request: Request, response: Response, repo: str = "") -> Respons
             if p.name not in state.sourceinfos:
                 # FIXME: can also break things if it's the only provides and removed,
                 # and also is ok to remove if there is a replacement
-                removals.append((s, p, ", ".join([d.name for d in p.rdepends])))
+                removals.append((p, ", ".join([d.name for d in p.rdepends])))
 
     return templates.TemplateResponse("queue.html", {
         "request": request,
@@ -602,6 +656,7 @@ async def queue(request: Request, response: Response, repo: str = "") -> Respons
         "removals": removals,
         "repos": repos,
         "repo_filter": repo_filter,
+        "cycles": state.build_status.cycles,
     }, headers=dict(response.headers))
 
 
