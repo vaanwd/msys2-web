@@ -62,11 +62,11 @@
         {% endif%}
       </dd>
 
-      {% for info in s.external_infos %}
-      <dt class="col-sm-3 text-sm-end">{{ info.name }}:</dt>
+      {% for ext_id, info in s.external_infos %}
+      <dt class="col-sm-3 text-sm-end">{{ ext_id.name }}:</dt>
       <dd class="col-sm-9"><a href="{{ info.url }}">{{ info.version }}</a>
-          {% for url in info.other_urls %}
-              | <a href="{{ url }}">{{ url.rsplit("/")[-1] }}</a>
+          {% for url, label in info.other_urls|dictsort %}
+              | <a href="{{ url }}">{{ label }}</a>
           {% endfor %}
       </dd>
     {% endfor %}
@@ -209,7 +209,7 @@
       <dd class="col-sm-9">
         {% if p.provided_by %}
             <ul class="list-unstyled">
-                {% for p in p.provided_by|sort %}
+                {% for p in p.provided_by|sort(attribute='key') %}
                     <li><a href="{{ package_url(p) }}">{{ p.name }}</a> </li>
                 {% endfor %}
             </ul>

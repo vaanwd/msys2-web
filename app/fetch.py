@@ -21,7 +21,8 @@ import httpx
 from aiolimiter import AsyncLimiter
 import zstandard
 
-from .appstate import state, Source, CygwinVersions, get_repositories, SrcInfoPackage, Package, DepType, Repository, BuildStatus, PkgMeta
+from .appstate import state, Source, get_repositories, SrcInfoPackage, Package, DepType, Repository, BuildStatus, PkgMeta, \
+    ExtInfo, ExtId
 from .appconfig import CYGWIN_METADATA_URL, REQUEST_TIMEOUT, AUR_METADATA_URL, ARCH_REPO_CONFIG, PKGMETA_URLS, \
     SRCINFO_URLS, UPDATE_INTERVAL, BUILD_STATUS_URLS, UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL
 from .utils import version_is_newer_than, arch_version_to_msys, extract_upstream_version
@@ -45,6 +46,7 @@ async def get_content_cached_mtime(url: str, *args: Any, **kwargs: Any) -> Tuple
     if cache_dir is None:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             r = await client.get(url, *args, **kwargs)
+            r.raise_for_status()
             return (r.content, get_mtime_for_response(r))
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -58,6 +60,7 @@ async def get_content_cached_mtime(url: str, *args: Any, **kwargs: Any) -> Tuple
     if not os.path.exists(fn):
         async with httpx.AsyncClient(follow_redirects=True) as client:
             r = await client.get(url, *args, **kwargs)
+            r.raise_for_status()
             with open(fn, "wb") as h:
                 h.write(r.content)
             mtime = get_mtime_for_response(r)
@@ -74,12 +77,13 @@ async def get_content_cached(url: str, *args: Any, **kwargs: Any) -> bytes:
     return (await get_content_cached_mtime(url, *args, **kwargs))[0]
 
 
-def parse_cygwin_versions(base_url: str, data: bytes) -> CygwinVersions:
+def parse_cygwin_versions(base_url: str, data: bytes) -> Tuple[Dict[str, ExtInfo], Dict[str, ExtInfo]]:
     # This is kinda hacky: extract the source name from the src tarball and take
     # last version line before it
     version = None
     source_package = None
-    versions: CygwinVersions = {}
+    versions: Dict[str, ExtInfo] = {}
+    versions_mingw64: Dict[str, ExtInfo] = {}
     base_url = base_url.rsplit("/", 2)[0]
     in_main = True
     for line in data.decode("utf-8").splitlines():
@@ -94,12 +98,28 @@ def parse_cygwin_versions(base_url: str, data: bytes) -> CygwinVersions:
             source_package = fn.rsplit("/")[-1].rsplit("-", 3)[0]
             src_url = base_url + "/" + fn
             assert version is not None
-            if source_package in versions:
-                existing_version = versions[source_package][0]
-                if not version_is_newer_than(version, existing_version):
-                    continue
-            versions[source_package] = (version, "https://cygwin.com/packages/summary/%s-src.html" % source_package, src_url)
-    return versions
+            src_url_name = src_url.rsplit("/")[-1]
+            if source_package.startswith("mingw64-x86_64-"):
+                info_name = source_package.split("-", 2)[-1]
+                if info_name in versions_mingw64:
+                    existing_version = versions_mingw64[info_name][0]
+                    if not version_is_newer_than(version, existing_version):
+                        continue
+                versions_mingw64[info_name] = ExtInfo(
+                    version, 0,
+                    "https://cygwin.com/packages/summary/%s-src.html" % source_package,
+                    {src_url: src_url_name})
+            else:
+                info_name = source_package
+                if info_name in versions:
+                    existing_version = versions[info_name][0]
+                    if not version_is_newer_than(version, existing_version):
+                        continue
+                versions[info_name] = ExtInfo(
+                    version, 0,
+                    "https://cygwin.com/packages/summary/%s-src.html" % source_package,
+                    {src_url: src_url_name})
+    return versions, versions_mingw64
 
 
 async def update_cygwin_versions() -> None:
@@ -110,8 +130,9 @@ async def update_cygwin_versions() -> None:
     print("Loading %r" % url)
     data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
     data = zstandard.ZstdDecompressor().decompress(data)
-    cygwin_versions = parse_cygwin_versions(url, data)
-    state.cygwin_versions = cygwin_versions
+    cygwin_versions, cygwin_versions_mingw64 = parse_cygwin_versions(url, data)
+    state.set_ext_infos(ExtId("cygwin", "Cygwin", True), cygwin_versions)
+    state.set_ext_infos(ExtId("cygwin-mingw64", "Cygwin-mingw64", False), cygwin_versions_mingw64)
 
 
 async def update_build_status() -> None:
@@ -152,7 +173,7 @@ def parse_desc(t: str) -> Dict[str, List[str]]:
     return d
 
 
-async def parse_repo(repo: Repository) -> Dict[str, Source]:
+async def parse_repo(repo: Repository, include_files: bool = True) -> Dict[str, Source]:
     sources: Dict[str, Source] = {}
     print("Loading %r" % repo.files_url)
 
@@ -165,7 +186,8 @@ async def parse_repo(repo: Repository) -> Dict[str, Source]:
 
         source.add_desc(d, repo)
 
-    data = await get_content_cached(repo.files_url, timeout=REQUEST_TIMEOUT)
+    data = await get_content_cached(
+        repo.files_url if include_files else repo.db_url, timeout=REQUEST_TIMEOUT)
 
     with io.BytesIO(data) as f:
         with ExtTarFile.open(fileobj=f, mode="r") as tar:
@@ -200,11 +222,16 @@ async def update_arch_versions() -> None:
         return
 
     print("update versions")
-    arch_versions: Dict[str, Tuple[str, str, int]] = {}
+    arch_versions: Dict[str, ExtInfo] = {}
     awaitables = []
     for (url, repo) in ARCH_REPO_CONFIG:
         download_url = url.rsplit("/", 1)[0]
-        awaitables.append(parse_repo(Repository(repo, "", "", "", download_url, download_url, "")))
+        awaitables.append(
+            parse_repo(
+                Repository(repo, "", "", "", download_url, download_url, ""),
+                False
+            )
+        )
 
     # priority: real packages > real provides > aur packages > aur provides
 
@@ -212,64 +239,65 @@ async def update_arch_versions() -> None:
         for source in sources.values():
             version = extract_upstream_version(arch_version_to_msys(source.version))
             for p in source.packages.values():
-                url = "https://www.archlinux.org/packages/%s/%s/%s/" % (
+                url = "https://archlinux.org/packages/%s/%s/%s/" % (
                     p.repo, p.arch, p.name)
 
                 if p.name in arch_versions:
                     old_ver = arch_versions[p.name][0]
                     if version_is_newer_than(version, old_ver):
-                        arch_versions[p.name] = (version, url, p.builddate)
+                        arch_versions[p.name] = ExtInfo(version, p.builddate, url, {})
                 else:
-                    arch_versions[p.name] = (version, url, p.builddate)
+                    arch_versions[p.name] = ExtInfo(version, p.builddate, url, {})
 
-            url = "https://www.archlinux.org/packages/%s/%s/%s/" % (
+            url = "https://archlinux.org/packages/%s/%s/%s/" % (
                 source.repos[0], source.arches[0], source.name)
             if source.name in arch_versions:
                 old_ver = arch_versions[source.name][0]
                 if version_is_newer_than(version, old_ver):
-                    arch_versions[source.name] = (version, url, source.date)
+                    arch_versions[source.name] = ExtInfo(version, source.date, url, {})
             else:
-                arch_versions[source.name] = (version, url, source.date)
+                arch_versions[source.name] = ExtInfo(version, source.date, url, {})
 
             # use provides as fallback
             for p in source.packages.values():
-                url = "https://www.archlinux.org/packages/%s/%s/%s/" % (
+                url = "https://archlinux.org/packages/%s/%s/%s/" % (
                     p.repo, p.arch, p.name)
 
                 for provides in sorted(p.provides.keys()):
                     if provides not in arch_versions:
-                        arch_versions[provides] = (version, url, p.builddate)
+                        arch_versions[provides] = ExtInfo(version, p.builddate, url, {})
 
     print("done")
+    state.set_ext_infos(ExtId("archlinux", "Arch Linux", False), arch_versions)
 
     print("update versions from AUR")
+    aur_versions: Dict[str, ExtInfo] = {}
     r = await get_content_cached(AUR_METADATA_URL,
                                  timeout=REQUEST_TIMEOUT)
     items = json.loads(r)
     for item in items:
         name = item["Name"]
-        # We use AUR as a fallback only, since it might contain development builds
-        if name in arch_versions:
+        if name in aur_versions:
             continue
         version = item["Version"]
         msys_ver = extract_upstream_version(arch_version_to_msys(version))
         last_modified = item["LastModified"]
         url = "https://aur.archlinux.org/packages/%s" % name
-        arch_versions[name] = (msys_ver, url, last_modified)
+        aur_versions[name] = ExtInfo(msys_ver, last_modified, url, {})
 
     for item in items:
         name = item["Name"]
         for provides in sorted(item.get("Provides", [])):
-            if provides in arch_versions:
+            if provides in aur_versions:
                 continue
             version = item["Version"]
             msys_ver = extract_upstream_version(arch_version_to_msys(version))
             last_modified = item["LastModified"]
             url = "https://aur.archlinux.org/packages/%s" % name
-            arch_versions[provides] = (msys_ver, url, last_modified)
+            aur_versions[provides] = ExtInfo(msys_ver, last_modified, url, {})
 
     print("done")
-    state.arch_versions = arch_versions
+    state.set_ext_infos(ExtId("aur", "AUR", True), aur_versions)
 
 
 async def check_needs_update(urls: List[str], _cache: Dict[str, str] = {}) -> bool:
@@ -428,9 +456,13 @@ async def trigger_loop() -> None:
         await asyncio.sleep(UPDATE_INTERVAL)
         queue_update()
 
+_background_tasks = set()
+
 
 async def update_loop() -> None:
-    asyncio.create_task(trigger_loop())
+    task = asyncio.create_task(trigger_loop())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     while True:
         async with _rate_limit:
             print("check for updates")

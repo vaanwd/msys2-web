@@ -20,16 +20,20 @@ from .utils import vercmp, version_is_newer_than, extract_upstream_version, spli
 from .pgp import parse_signature
 
 
-CygwinVersions = Dict[str, Tuple[str, str, str]]
-
 PackageKey = Tuple[str, str, str, str, str]
 
-ExtInfo = NamedTuple('ExtInfo', [
+ExtId = NamedTuple('ExtId', [
+    ('id', str),
     ('name', str),
+    # If the versions should be considered only as a fallback
+    ('fallback', bool),
+])
+
+ExtInfo = NamedTuple('ExtInfo', [
     ('version', str),
     ('date', int),
     ('url', str),
-    ('other_urls', List[str]),
+    ('other_urls', Dict[str, str]),
 ])
 
 PackagerInfo = NamedTuple('PackagerInfo', [
@@ -76,50 +80,6 @@ def get_realname_variants(s: Source) -> List[str]:
     return main + sorted(package_variants) + sorted(provides_variants)
 
 
-def get_arch_info_for_base(s: Source) -> Optional[ExtInfo]:
-    global state
-
-    if "archlinux" in s.pkgmeta.references:
-        mapped = s.pkgmeta.references["archlinux"]
-        if mapped is None:
-            return None
-        variants = [mapped]
-    else:
-        variants = get_realname_variants(s)
-
-    for arch_name in variants:
-        if arch_name in state.arch_versions:
-            arch_info = state.arch_versions[arch_name]
-            version = arch_info[0]
-            url = arch_info[1]
-            return ExtInfo("Arch Linux", version, arch_info[2], url, [])
-
-    return None
-
-
-def get_cygwin_info_for_base(s: Source) -> Optional[ExtInfo]:
-    global state
-
-    # XXX: we only care about msys packages here
-    if s.name != s.realname:
-        return None
-
-    if "cygwin" in s.pkgmeta.references:
-        mapped = s.pkgmeta.references["cygwin"]
-        if mapped is None:
-            return None
-        variants = [mapped]
-    else:
-        variants = get_realname_variants(s)
-
-    for realname in variants:
-        if realname in state.cygwin_versions:
-            info = state.cygwin_versions[realname]
-            return ExtInfo("Cygwin", info[0], 0, info[1], [info[2]])
-
-    return None
-
-
 def cleanup_files(files: List[str]) -> List[str]:
     """Remove redundant directory paths and root them"""
 
@@ -154,6 +114,10 @@ class Repository:
         self.src_url = src_url
 
     @property
+    def db_url(self) -> str:
+        return self.url.rstrip("/") + "/" + self.name + ".db"
+
+    @property
     def files_url(self) -> str:
         return self.url.rstrip("/") + "/" + self.name + ".files"
 
@@ -182,7 +146,7 @@ class PkgMetaEntry(BaseModel):
     internal: bool = Field(default=False)
     """If the package is MSYS2 internal or just a meta package"""
 
-    references: Dict[str, str] = Field(default_factory=dict)
+    references: Dict[str, Optional[str]] = Field(default_factory=dict)
     """References to third party repositories"""
 
 
@@ -220,8 +184,7 @@ class AppState:
         self._sources: Dict[str, Source] = {}
         self._sourceinfos: Dict[str, SrcInfoPackage] = {}
         self._pkgmeta: PkgMeta = PkgMeta(packages={})
-        self._arch_versions: Dict[str, Tuple[str, str, int]] = {}
-        self._cygwin_versions: CygwinVersions = {}
+        self._ext_infos: Dict[ExtId, Dict[str, ExtInfo]] = {}
         self._build_status: BuildStatus = BuildStatus()
         self._update_etag()
 
@@ -265,12 +228,14 @@ class AppState:
         self._update_etag()
 
     @property
-    def arch_versions(self) -> Dict[str, Tuple[str, str, int]]:
-        return self._arch_versions
+    def ext_info_ids(self) -> List[ExtId]:
+        return list(self._ext_infos.keys())
 
-    @arch_versions.setter
-    def arch_versions(self, versions: Dict[str, Tuple[str, str, int]]) -> None:
-        self._arch_versions = versions
+    def get_ext_infos(self, id: ExtId) -> Dict[str, ExtInfo]:
+        return self._ext_infos.get(id, {})
+
+    def set_ext_infos(self, id: ExtId, info: Dict[str, ExtInfo]) -> None:
+        self._ext_infos[id] = info
         self._update_etag()
 
     @property
@@ -280,15 +245,6 @@ class AppState:
     @build_status.setter
     def build_status(self, build_status: BuildStatus) -> None:
         self._build_status = build_status
-        self._update_etag()
-
-    @property
-    def cygwin_versions(self) -> CygwinVersions:
-        return self._cygwin_versions
-
-    @cygwin_versions.setter
-    def cygwin_versions(self, cygwin_versions: CygwinVersions) -> None:
-        self._cygwin_versions = cygwin_versions
         self._update_etag()
 
 
@@ -468,13 +424,23 @@ class Source:
         return sorted(licenses)
 
     @property
-    def upstream_version(self) -> str:
+    def upstream_info(self) -> Optional[ExtInfo]:
         # Take the newest version of the external versions
-        version = None
-        for info in self.external_infos:
-            if version is None or version_is_newer_than(info.version, version):
-                version = info.version
-        return version or ""
+        newest = None
+        fallback = None
+        for ext_id, info in self.external_infos:
+            if ext_id.fallback:
+                if fallback is None or version_is_newer_than(info.version, fallback.version):
+                    fallback = info
+            else:
+                if newest is None or version_is_newer_than(info.version, newest.version):
+                    newest = info
+        return newest or fallback or None
+
+    @property
+    def upstream_version(self) -> str:
+        upstream_info = self.upstream_info
+        return upstream_info.version if upstream_info is not None else ""
 
     @property
     def pkgmeta(self) -> PkgMetaEntry:
@@ -483,7 +449,7 @@ class Source:
         return state.pkgmeta.packages.get(self.name, PkgMetaEntry())
 
     @property
-    def external_infos(self) -> Sequence[ExtInfo]:
+    def external_infos(self) -> Sequence[Tuple[ExtId, ExtInfo]]:
         global state
 
         # internal package, don't try to link it
@@ -491,13 +457,20 @@ class Source:
             return []
 
         ext = []
-        arch_info = get_arch_info_for_base(self)
-        if arch_info is not None:
-            ext.append(arch_info)
+        for ext_id in state.ext_info_ids:
+            if ext_id.id in self.pkgmeta.references:
+                mapped = self.pkgmeta.references[ext_id.id]
+                if mapped is None:
+                    continue
+                variants = [mapped]
+            else:
+                variants = get_realname_variants(self)
 
-        cygwin_info = get_cygwin_info_for_base(self)
-        if cygwin_info is not None:
-            ext.append(cygwin_info)
+            infos = state.get_ext_infos(ext_id)
+            for realname in variants:
+                if realname in infos:
+                    ext.append((ext_id, infos[realname]))
+                    break
 
         return sorted(ext)
 
@@ -505,7 +478,7 @@ class Source:
     def is_outdated(self) -> bool:
         msys_version = extract_upstream_version(self.version)
 
-        for info in self.external_infos:
+        for ext_id, info in self.external_infos:
             if version_is_newer_than(info.version, msys_version):
                 return True
         return False
