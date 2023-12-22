@@ -1,8 +1,6 @@
 # type: ignore
 
 import os
-import base64
-import datetime
 
 os.environ["NO_MIDDLEWARE"] = "1"
 
@@ -10,8 +8,8 @@ import pytest
 from app import app
 from app.appstate import SrcInfoPackage, parse_packager
 from app.fetch import parse_cygwin_versions
-from app.pgp import parse_signature, SigError, Signature
 from app.utils import split_optdepends, strip_vcs, vercmp
+from app.pkgextra import extra_to_pkgextra_entry
 from fastapi.testclient import TestClient
 
 
@@ -119,28 +117,6 @@ build-depends: cygport
     assert versions["headers"].version == "11.0.1"
 
 
-EXAMPLE_SIG = (
-    "iHUEABEIAB0WIQStNRxQrghXdetZMztfku/BpH1FoQUCXlOY5wAKCRBfku"
-    "/BpH1FodQoAP4nQnPNLnx5MVIJgZgCwW/hplW7Ai9MqkmFBqD8/+EXfAD/"
-    "Rgxtz2XH7RZ1JKh7PN5NsVz9UlBM7977PjFg9WptNGU=")
-
-
-def test_pgp():
-    with pytest.raises(SigError):
-        parse_signature(b"")
-
-    with pytest.raises(SigError):
-        parse_signature(b"foobar")
-
-    data = base64.b64decode(EXAMPLE_SIG)
-    sig = parse_signature(data)
-    assert isinstance(sig, Signature)
-    assert sig.keyid == "5f92efc1a47d45a1"
-    assert sig.date == datetime.datetime(2020, 2, 24, 9, 35, 35)
-    assert sig.name == "Alexey Pavlov"
-    assert sig.url == "https://keyserver.ubuntu.com/pks/lookup?op=vindex&fingerprint=on&search=0x5f92efc1a47d45a1"
-
-
 def test_parse_packager():
     info = parse_packager("foobar")
     assert info.name == "foobar"
@@ -188,6 +164,19 @@ pkgname = something
     assert list(something.depends) == []
 
 
+def test_for_pkgbasedesc():
+    info = """
+pkgbase = libarchive
+\tpkgdesc = base-desc
+pkgname = libarchive-devel
+\tpkgdesc = sub-desc
+\n"""
+
+    packages = SrcInfoPackage.for_srcinfo(
+        info, "repo", "https://foo.bar", "/", "2021-01-15")
+    assert list(packages)[0].pkgbasedesc == "base-desc"
+
+
 def test_vercmp():
 
     def test_ver(a, b, res):
@@ -219,3 +208,14 @@ def test_vercmp():
 
     # FIXME:
     # test_ver(".0", "0", 1)
+
+
+def test_extra_to_pkgextra_entry():
+    assert extra_to_pkgextra_entry({"internal": "True"}).internal
+    assert not extra_to_pkgextra_entry({"internal": "false"}).internal
+    assert extra_to_pkgextra_entry(
+        {"references": ['foo: quux', 'bar']}
+    ).references == {'foo': 'quux', 'bar': None}
+    assert extra_to_pkgextra_entry(
+        {"changelog_url": "foo"}
+    ).changelog_url == "foo"

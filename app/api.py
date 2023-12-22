@@ -1,33 +1,38 @@
-from fastapi import FastAPI, APIRouter, Request, Response
+from fastapi import FastAPI, APIRouter, Request, Response, Depends
 from fastapi.responses import JSONResponse
+from fastapi_etag import Etag
 from pydantic import BaseModel
 
-from typing import Tuple, Dict, List, Set, Iterable, Union, Optional
+from collections.abc import Iterable
 from .appstate import state, SrcInfoPackage
-from .utils import version_is_newer_than
+from .utils import extract_upstream_version, version_is_newer_than
 from .fetch import queue_update
 
 
 class QueueBuild(BaseModel):
-    packages: List[str]
-    depends: Dict[str, List[str]]
+    packages: list[str]
+    depends: dict[str, list[str]]
     new: bool
 
 
 class QueueEntry(BaseModel):
     name: str
     version: str
-    version_repo: Optional[str]
+    version_repo: str | None
     repo_url: str
     repo_path: str
     source: bool
-    builds: Dict[str, QueueBuild]
+    builds: dict[str, QueueBuild]
+
+
+async def get_etag(request: Request) -> str:
+    return state.etag
 
 
 router = APIRouter()
 
 
-def get_srcinfos_to_build() -> Tuple[List[SrcInfoPackage], Set[str]]:
+def get_srcinfos_to_build() -> tuple[list[SrcInfoPackage], set[str]]:
     srcinfos = []
 
     # packages that should be updated
@@ -40,8 +45,8 @@ def get_srcinfos_to_build() -> Tuple[List[SrcInfoPackage], Set[str]]:
                 srcinfos.append(srcinfo)
 
     # packages that are new
-    not_in_repo: Dict[str, List[SrcInfoPackage]] = {}
-    replaces_not_in_repo: Set[str] = set()
+    not_in_repo: dict[str, list[SrcInfoPackage]] = {}
+    replaces_not_in_repo: set[str] = set()
     for srcinfo in state.sourceinfos.values():
         not_in_repo.setdefault(srcinfo.pkgname, []).append(srcinfo)
         replaces_not_in_repo.update(srcinfo.replaces)
@@ -49,7 +54,7 @@ def get_srcinfos_to_build() -> Tuple[List[SrcInfoPackage], Set[str]]:
         for p in s.packages.values():
             not_in_repo.pop(p.name, None)
             replaces_not_in_repo.discard(p.name)
-    marked_new: Set[str] = set()
+    marked_new: set[str] = set()
     for sis in not_in_repo.values():
         srcinfos.extend(sis)
         # packages that are considered new, that don't exist in the repo, or
@@ -64,8 +69,8 @@ def get_srcinfos_to_build() -> Tuple[List[SrcInfoPackage], Set[str]]:
     return srcinfos, marked_new
 
 
-@router.get('/buildqueue2', response_model=List[QueueEntry])
-async def buildqueue2(request: Request, response: Response) -> List[QueueEntry]:
+@router.get('/buildqueue2', response_model=list[QueueEntry])
+async def buildqueue2(request: Request, response: Response) -> list[QueueEntry]:
     srcinfos, marked_new = get_srcinfos_to_build()
 
     srcinfo_provides = {}
@@ -87,7 +92,7 @@ async def buildqueue2(request: Request, response: Response) -> List[QueueEntry]:
         # if there is no real one, try to find a provider
         return srcinfo_provides.get(pkgname, pkgname)
 
-    def get_transitive_depends_and_resolve(packages: Iterable[str]) -> Set[str]:
+    def get_transitive_depends_and_resolve(packages: Iterable[str]) -> set[str]:
         todo = set(packages)
         done = set()
         while todo:
@@ -100,8 +105,8 @@ async def buildqueue2(request: Request, response: Response) -> List[QueueEntry]:
                 todo.update(si.depends.keys())
         return done
 
-    def get_transitive_makedepends(packages: Iterable[str]) -> Set[str]:
-        todo: Set[str] = set()
+    def get_transitive_makedepends(packages: Iterable[str]) -> set[str]:
+        todo: set[str] = set()
         for name in packages:
             # don't resolve here, we want the real deps of the packages to build
             # even if it gets replaced
@@ -110,7 +115,7 @@ async def buildqueue2(request: Request, response: Response) -> List[QueueEntry]:
             todo.update(si.makedepends.keys())
         return get_transitive_depends_and_resolve(todo)
 
-    def srcinfo_get_repo_version(si: SrcInfoPackage) -> Optional[str]:
+    def srcinfo_get_repo_version(si: SrcInfoPackage) -> str | None:
         if si.pkgbase in state.sources:
             return state.sources[si.pkgbase].version
         return None
@@ -126,21 +131,21 @@ async def buildqueue2(request: Request, response: Response) -> List[QueueEntry]:
     def srcinfo_is_new(si: SrcInfoPackage) -> bool:
         return si.pkgname in marked_new
 
-    def build_key(srcinfo: SrcInfoPackage) -> Tuple[str, str]:
+    def build_key(srcinfo: SrcInfoPackage) -> tuple[str, str]:
         return (srcinfo.repo_url, srcinfo.repo_path)
 
-    to_build: Dict[Tuple, List[SrcInfoPackage]] = {}
+    to_build: dict[tuple, list[SrcInfoPackage]] = {}
     for srcinfo in srcinfos:
         key = build_key(srcinfo)
         to_build.setdefault(key, []).append(srcinfo)
 
     entries = []
     repo_mapping = {}
-    all_packages: Set[str] = set()
+    all_packages: set[str] = set()
     for srcinfos in to_build.values():
         packages = set()
         needs_src = False
-        new_all: Dict[str, List[bool]] = {}
+        new_all: dict[str, list[bool]] = {}
         version_repo = None
         for si in srcinfos:
             if not srcinfo_has_src(si):
@@ -172,8 +177,8 @@ async def buildqueue2(request: Request, response: Response) -> List[QueueEntry]:
         e["makedepends"] &= all_packages
         e["makedepends"] -= e["packages"]
 
-    def group_by_repo(sequence: Iterable[str]) -> Dict[str, List]:
-        grouped: Dict[str, List] = {}
+    def group_by_repo(sequence: Iterable[str]) -> dict[str, list]:
+        grouped: dict[str, list] = {}
         for name in sequence:
             grouped.setdefault(repo_mapping[name], []).append(name)
         for key, values in grouped.items():
@@ -195,7 +200,7 @@ async def buildqueue2(request: Request, response: Response) -> List[QueueEntry]:
 
         makedepends = e["makedepends"]
 
-        builds: Dict[str, QueueBuild] = {}
+        builds: dict[str, QueueBuild] = {}
         deps_grouped = group_by_repo(makedepends)
 
         for repo, build_packages in group_by_repo(e["packages"]).items():
@@ -246,7 +251,7 @@ async def search(request: Request, response: Response, query: str = "", qtype: s
         qtype = "pkg"
 
     parts = query.split()
-    res_pkg: List[Dict[str, Union[str, List[str], int]]] = []
+    res_pkg: list[dict[str, str | list[str] | int]] = []
     exact = {}
     if not query:
         pass
@@ -281,6 +286,36 @@ async def search(request: Request, response: Response, query: str = "", qtype: s
 async def do_trigger_update(request: Request) -> Response:
     queue_update()
     return JSONResponse({})
+
+
+class OutOfDateEntry(BaseModel):
+    name: str
+    repo_url: str
+    repo_path: str
+    version_git: str
+    version_upstream: str
+
+
+@router.get('/outofdate', response_model=list[OutOfDateEntry], dependencies=[Depends(Etag(get_etag))])
+async def outofdate(request: Request, response: Response) -> list[OutOfDateEntry]:
+    to_update = []
+
+    for s in state.sources.values():
+        if s.pkgextra.internal:
+            continue
+
+        git_version = extract_upstream_version(s.git_version)
+        info = s.upstream_info
+        if info is not None and info.version != "":
+            if version_is_newer_than(info.version, git_version):
+                to_update.append(OutOfDateEntry(
+                    name=s.name,
+                    repo_url=s.repo_url,
+                    repo_path=s.repo_path,
+                    version_git=git_version,
+                    version_upstream=info.version))
+
+    return to_update
 
 
 api = FastAPI(title="MSYS2 Packages API", docs_url="/")

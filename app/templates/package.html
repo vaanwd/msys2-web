@@ -6,7 +6,6 @@
 <div class="card mb-3">
   <div class="card-header">
     <h4 class="card-title">Package: <a href="{{ package_url(p) }}">{{ p.name }}</a></h4>
-    <h6 class="card-subtitle mb-2 text-muted">{{ p.desc }}</h6>
   </div>
   <div class="card-header text-muted">
     <div class="row">
@@ -17,10 +16,10 @@
             <a href="{{ s.history_url }}" class="card-link">View Changes</a>
         </div>
         <div class="col-sm border-end text-center">
-            <a href="{{ s.searchbug_url }}" class="card-link">Bug Reports</a>
+            <a href="{{ s.searchbug_url }}" class="card-link">View Issues</a>
         </div>
         <div class="col-sm text-center">
-            <a href="{{ s.filebug_url }}" class="card-link">Add New Bug</a>
+            <a href="{{ s.filebug_url }}" class="card-link">Report Issue</a>
         </div>
     </div>
   </div>
@@ -31,6 +30,11 @@
 
       <dt class="col-sm-3 text-sm-end"></dt>
       <dd class="col-sm-9"><hr></dd>
+
+      <dt class="col-sm-3 text-sm-end">Description:</dt>
+      <dd class="col-sm-9">
+        {{ p.desc }}
+      </dd>
 
       <dt class="col-sm-3 text-sm-end">Group(s):</dt>
       <dd class="col-sm-9">
@@ -44,8 +48,12 @@
       <dt class="col-sm-3 text-sm-end">Repo:</dt>
       <dd class="col-sm-9">{{ p.repo }}</dd>
 
-      <dt class="col-sm-3 text-sm-end">Upstream URL:</dt>
-      <dd class="col-sm-9"><a href="{{ p.url }}">{{ p.url }}</a></dd>
+      {% for name, url in p.urls %}
+      <dt class="col-sm-3 text-sm-end">{{ name }}:</dt>
+      <dd class="col-sm-9">
+        <a href="{{ url }}">{{ url }}</a>
+      </dd>
+      {% endfor %}
 
       <dt class="col-sm-3 text-sm-end">License(s):</dt>
       <dd class="col-sm-9">{{ licenses_to_html(p.licenses)|safe }}</dd>
@@ -64,7 +72,7 @@
 
       {% for ext_id, info in s.external_infos %}
       <dt class="col-sm-3 text-sm-end">{{ ext_id.name }}:</dt>
-      <dd class="col-sm-9"><a href="{{ info.url }}">{{ info.version }}</a>
+      <dd class="col-sm-9"><a href="{{ info.url }}">{{ info.version or info.name }}</a>
           {% for url, label in info.other_urls|dictsort %}
               | <a href="{{ url }}">{{ label }}</a>
           {% endfor %}
@@ -95,12 +103,6 @@
 
       <dt class="col-sm-3 text-sm-end">Build Date:</dt>
       <dd class="col-sm-9">{{ p.builddate|timestamp }}</dd>
-
-      <dt class="col-sm-3 text-sm-end">Signed By:</dt>
-      <dd class="col-sm-9"><a href="{{ p.signature.url }}">{{ p.signature.name }}</a></dd>
-
-      <dt class="col-sm-3 text-sm-end">Signature Date:</dt>
-      <dd class="col-sm-9">{{ p.signature.date }}</dd>
 
       <dt class="col-sm-3 text-sm-end">Package Size:</dt>
       <dd class="col-sm-9">{{ p.csize|filesize }}</dd>

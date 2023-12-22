@@ -6,7 +6,6 @@
 <div class="card mb-3">
   <div class="card-header">
     <h4 class="card-title">Base Package: <a href="{{ s.name }}">{{ s.name }}</a></h4>
-    <h6 class="card-subtitle mb-2 text-muted">{{ s.desc }}</h6>
   </div>
   <div class="card-header text-muted">
     <div class="row">
@@ -17,10 +16,10 @@
             <a href="{{ s.history_url }}" class="card-link">View Changes</a>
         </div>
         <div class="col-sm border-end text-center">
-            <a href="{{ s.searchbug_url }}" class="card-link">Bug Reports</a>
+            <a href="{{ s.searchbug_url }}" class="card-link">View Issues</a>
         </div>
         <div class="col-sm text-center">
-            <a href="{{ s.filebug_url }}" class="card-link">Add New Bug</a>
+            <a href="{{ s.filebug_url }}" class="card-link">Report Issue</a>
         </div>
     </div>
   </div>
@@ -31,12 +30,17 @@
       A <strong>newer upstream version ({{ s.upstream_version }})</strong>
       is available.<br>Consider packaging the new version for
       MSYS2 as well. See <a
-      href="https://www.msys2.org/wiki/Creating-Packages/">the
+      href="https://www.msys2.org/dev/update-package">the
       packaging guide</a> for how to help.
     </div></small>
     {% endif %}
 
     <dl class="row">
+      <dt class="col-sm-3 text-sm-end">Description:</dt>
+      <dd class="col-sm-9">
+        {{ s.desc }}
+      </dd>
+
       <dt class="col-sm-3 text-sm-end">Base Group(s):</dt>
       <dd class="col-sm-9">
         {% for g in s.basegroups %}
@@ -55,8 +59,12 @@
         {% endfor %}
       </dd>
 
-      <dt class="col-sm-3 text-sm-end">Upstream URL:</dt>
-      <dd class="col-sm-9"><a href="{{ s.url }}">{{ s.url }}</a></dd>
+      {% for name, url in s.urls %}
+      <dt class="col-sm-3 text-sm-end">{{ name }}:</dt>
+      <dd class="col-sm-9">
+        <a href="{{ url }}">{{ url }}</a>
+      </dd>
+      {% endfor %}
 
       <dt class="col-sm-3 text-sm-end">License(s):</dt>
       <dd class="col-sm-9">
@@ -79,7 +87,7 @@
 
       {% for ext_id, info in s.external_infos %}
         <dt class="col-sm-3 text-sm-end">{{ ext_id.name }}:</dt>
-        <dd class="col-sm-9"><a href="{{ info.url }}">{{ info.version }}</a>
+        <dd class="col-sm-9"><a href="{{ info.url }}">{{ info.version or info.name }}</a>
             {% for url, label in info.other_urls|dictsort %}
                 | <a href="{{ url }}">{{ label }}</a>
             {% endfor %}

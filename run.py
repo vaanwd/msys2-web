@@ -4,14 +4,14 @@
 import os
 import sys
 import argparse
-from typing import List, Optional, Union
 
 import uvicorn
 from app import app
 from app import appconfig
+from app import logger
 
 
-def main(argv: List[str]) -> Optional[Union[int, str]]:
+def main(argv: list[str]) -> int | str | None:
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--cache", action="store_true",
                         help="use local repo cache")
@@ -22,10 +22,10 @@ def main(argv: List[str]) -> Optional[Union[int, str]]:
     if args.cache:
         base = os.path.dirname(os.path.realpath(__file__))
         cache_dir = os.path.join(base, ".app.cache")
-        print(f"Using cache: {repr(cache_dir)}")
+        logger.info(f"Using cache: {repr(cache_dir)}")
         appconfig.CACHE_DIR = cache_dir
 
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_config=None)
 
     return None
 

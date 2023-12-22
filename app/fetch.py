@@ -10,27 +10,27 @@ import traceback
 import hashlib
 import functools
 import gzip
-import yaml
 import datetime
 from asyncio import Event
 from urllib.parse import urlparse, quote_plus
-from typing import Any, Dict, Tuple, List, Set, Optional
+from typing import Any, Optional
 from email.utils import parsedate_to_datetime
 
 import httpx
 from aiolimiter import AsyncLimiter
 import zstandard
 
-from .appstate import state, Source, get_repositories, SrcInfoPackage, Package, DepType, Repository, BuildStatus, PkgMeta, \
+from .appstate import state, Source, get_repositories, SrcInfoPackage, Package, DepType, Repository, BuildStatus, \
     ExtInfo, ExtId
-from .appconfig import CYGWIN_METADATA_URL, REQUEST_TIMEOUT, AUR_METADATA_URL, ARCH_REPO_CONFIG, PKGMETA_URLS, \
-    SRCINFO_URLS, UPDATE_INTERVAL, BUILD_STATUS_URLS, UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL
-from .utils import version_is_newer_than, arch_version_to_msys, extract_upstream_version
+from .pkgextra import PkgExtra, extra_to_pkgextra_entry
+from .appconfig import CYGWIN_METADATA_URL, REQUEST_TIMEOUT, AUR_METADATA_URL, ARCH_REPO_CONFIG, \
+    SRCINFO_URLS, UPDATE_INTERVAL, BUILD_STATUS_URLS, UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL, PYPI_URLS
+from .utils import version_is_newer_than, arch_version_to_msys, extract_upstream_version, logger
 from . import appconfig
 from .exttarfile import ExtTarFile
 
 
-def get_mtime_for_response(response: httpx.Response) -> Optional[datetime.datetime]:
+def get_mtime_for_response(response: httpx.Response) -> datetime.datetime | None:
     last_modified = response.headers.get("last-modified")
     if last_modified is not None:
         dt: datetime.datetime = parsedate_to_datetime(last_modified)
@@ -38,7 +38,7 @@ def get_mtime_for_response(response: httpx.Response) -> Optional[datetime.dateti
     return None
 
 
-async def get_content_cached_mtime(url: str, *args: Any, **kwargs: Any) -> Tuple[bytes, Optional[datetime.datetime]]:
+async def get_content_cached_mtime(url: str, *args: Any, **kwargs: Any) -> tuple[bytes, datetime.datetime | None]:
     """Returns the content of the URL response, and a datetime object for when the content was last modified"""
 
     # cache the file locally, and store the "last-modified" date as the file mtime
@@ -77,13 +77,13 @@ async def get_content_cached(url: str, *args: Any, **kwargs: Any) -> bytes:
     return (await get_content_cached_mtime(url, *args, **kwargs))[0]
 
 
-def parse_cygwin_versions(base_url: str, data: bytes) -> Tuple[Dict[str, ExtInfo], Dict[str, ExtInfo]]:
+def parse_cygwin_versions(base_url: str, data: bytes) -> tuple[dict[str, ExtInfo], dict[str, ExtInfo]]:
     # This is kinda hacky: extract the source name from the src tarball and take
     # last version line before it
     version = None
     source_package = None
-    versions: Dict[str, ExtInfo] = {}
-    versions_mingw64: Dict[str, ExtInfo] = {}
+    versions: dict[str, ExtInfo] = {}
+    versions_mingw64: dict[str, ExtInfo] = {}
     base_url = base_url.rsplit("/", 2)[0]
     in_main = True
     for line in data.decode("utf-8").splitlines():
@@ -106,7 +106,7 @@ def parse_cygwin_versions(base_url: str, data: bytes) -> Tuple[Dict[str, ExtInfo
                     if not version_is_newer_than(version, existing_version):
                         continue
                 versions_mingw64[info_name] = ExtInfo(
-                    version, 0,
+                    info_name, version, 0,
                     "https://cygwin.com/packages/summary/%s-src.html" % source_package,
                     {src_url: src_url_name})
             else:
@@ -116,7 +116,7 @@ def parse_cygwin_versions(base_url: str, data: bytes) -> Tuple[Dict[str, ExtInfo
                     if not version_is_newer_than(version, existing_version):
                         continue
                 versions[info_name] = ExtInfo(
-                    version, 0,
+                    info_name, version, 0,
                     "https://cygwin.com/packages/summary/%s-src.html" % source_package,
                     {src_url: src_url_name})
     return versions, versions_mingw64
@@ -126,8 +126,8 @@ async def update_cygwin_versions() -> None:
     url = CYGWIN_METADATA_URL
     if not await check_needs_update([url]):
         return
-    print("update cygwin info")
-    print("Loading %r" % url)
+    logger.info("update cygwin info")
+    logger.info("Loading %r" % url)
     data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
     data = zstandard.ZstdDecompressor().decompress(data)
     cygwin_versions, cygwin_versions_mingw64 = parse_cygwin_versions(url, data)
@@ -140,24 +140,24 @@ async def update_build_status() -> None:
     if not await check_needs_update(urls):
         return
 
-    print("update build status")
+    logger.info("update build status")
     responses = []
     for url in urls:
-        print("Loading %r" % url)
+        logger.info("Loading %r" % url)
         data, mtime = await get_content_cached_mtime(url, timeout=REQUEST_TIMEOUT)
-        print("Done: %r, %r" % (url, str(mtime)))
+        logger.info(f"Done: {url!r}, {str(mtime)!r}")
         responses.append((mtime, url, data))
 
     # use the newest of all status summaries
     newest = sorted(responses)[-1]
-    print("Selected: %r" % (newest[1],))
+    logger.info(f"Selected: {newest[1]!r}")
     state.build_status = BuildStatus.parse_raw(newest[2])
 
 
-def parse_desc(t: str) -> Dict[str, List[str]]:
-    d: Dict[str, List[str]] = {}
+def parse_desc(t: str) -> dict[str, list[str]]:
+    d: dict[str, list[str]] = {}
     cat = None
-    values: List[str] = []
+    values: list[str] = []
     for l in t.splitlines():
         l = l.strip()
         if cat is None:
@@ -173,9 +173,8 @@ def parse_desc(t: str) -> Dict[str, List[str]]:
     return d
 
 
-async def parse_repo(repo: Repository, include_files: bool = True) -> Dict[str, Source]:
-    sources: Dict[str, Source] = {}
-    print("Loading %r" % repo.files_url)
+async def parse_repo(repo: Repository, include_files: bool = True) -> dict[str, Source]:
+    sources: dict[str, Source] = {}
 
     def add_desc(d: Any) -> None:
         source = Source.from_desc(d, repo)
@@ -186,12 +185,13 @@ async def parse_repo(repo: Repository, include_files: bool = True) -> Dict[str, 
 
         source.add_desc(d, repo)
 
-    data = await get_content_cached(
-        repo.files_url if include_files else repo.db_url, timeout=REQUEST_TIMEOUT)
+    repo_url = repo.files_url if include_files else repo.db_url
+    logger.info("Loading %r" % repo_url)
+    data = await get_content_cached(repo_url, timeout=REQUEST_TIMEOUT)
 
     with io.BytesIO(data) as f:
         with ExtTarFile.open(fileobj=f, mode="r") as tar:
-            packages: Dict[str, list] = {}
+            packages: dict[str, list] = {}
             for info in tar:
                 package_name = info.name.split("/", 1)[0]
                 infofile = tar.extractfile(info)
@@ -221,8 +221,8 @@ async def update_arch_versions() -> None:
     if not await check_needs_update(urls):
         return
 
-    print("update versions")
-    arch_versions: Dict[str, ExtInfo] = {}
+    logger.info("update versions")
+    arch_versions: dict[str, ExtInfo] = {}
     awaitables = []
     for (url, repo) in ARCH_REPO_CONFIG:
         download_url = url.rsplit("/", 1)[0]
@@ -239,39 +239,37 @@ async def update_arch_versions() -> None:
         for source in sources.values():
             version = extract_upstream_version(arch_version_to_msys(source.version))
             for p in source.packages.values():
-                url = "https://archlinux.org/packages/%s/%s/%s/" % (
-                    p.repo, p.arch, p.name)
+                url = f"https://archlinux.org/packages/{p.repo}/{p.arch}/{p.name}/"
 
                 if p.name in arch_versions:
                     old_ver = arch_versions[p.name][0]
                     if version_is_newer_than(version, old_ver):
-                        arch_versions[p.name] = ExtInfo(version, p.builddate, url, {})
+                        arch_versions[p.name] = ExtInfo(p.name, version, p.builddate, url, {})
                 else:
-                    arch_versions[p.name] = ExtInfo(version, p.builddate, url, {})
+                    arch_versions[p.name] = ExtInfo(p.name, version, p.builddate, url, {})
 
-            url = "https://archlinux.org/packages/%s/%s/%s/" % (
+            url = "https://archlinux.org/packages/{}/{}/{}/".format(
                 source.repos[0], source.arches[0], source.name)
             if source.name in arch_versions:
                 old_ver = arch_versions[source.name][0]
                 if version_is_newer_than(version, old_ver):
-                    arch_versions[source.name] = ExtInfo(version, source.date, url, {})
+                    arch_versions[source.name] = ExtInfo(source.name, version, source.date, url, {})
             else:
-                arch_versions[source.name] = ExtInfo(version, source.date, url, {})
+                arch_versions[source.name] = ExtInfo(source.name, version, source.date, url, {})
 
             # use provides as fallback
             for p in source.packages.values():
-                url = "https://archlinux.org/packages/%s/%s/%s/" % (
-                    p.repo, p.arch, p.name)
+                url = f"https://archlinux.org/packages/{p.repo}/{p.arch}/{p.name}/"
 
                 for provides in sorted(p.provides.keys()):
                     if provides not in arch_versions:
-                        arch_versions[provides] = ExtInfo(version, p.builddate, url, {})
+                        arch_versions[provides] = ExtInfo(provides, version, p.builddate, url, {})
 
-    print("done")
+    logger.info("done")
     state.set_ext_infos(ExtId("archlinux", "Arch Linux", False), arch_versions)
 
-    print("update versions from AUR")
-    aur_versions: Dict[str, ExtInfo] = {}
+    logger.info("update versions from AUR")
+    aur_versions: dict[str, ExtInfo] = {}
     r = await get_content_cached(AUR_METADATA_URL,
                                  timeout=REQUEST_TIMEOUT)
     items = json.loads(r)
@@ -283,7 +281,7 @@ async def update_arch_versions() -> None:
         msys_ver = extract_upstream_version(arch_version_to_msys(version))
         last_modified = item["LastModified"]
         url = "https://aur.archlinux.org/packages/%s" % name
-        aur_versions[name] = ExtInfo(msys_ver, last_modified, url, {})
+        aur_versions[name] = ExtInfo(name, msys_ver, last_modified, url, {})
 
     for item in items:
         name = item["Name"]
@@ -294,36 +292,54 @@ async def update_arch_versions() -> None:
             msys_ver = extract_upstream_version(arch_version_to_msys(version))
             last_modified = item["LastModified"]
             url = "https://aur.archlinux.org/packages/%s" % name
-            aur_versions[provides] = ExtInfo(msys_ver, last_modified, url, {})
+            aur_versions[provides] = ExtInfo(provides, msys_ver, last_modified, url, {})
 
-    print("done")
+    logger.info("done")
     state.set_ext_infos(ExtId("aur", "AUR", True), aur_versions)
 
 
-async def check_needs_update(urls: List[str], _cache: Dict[str, str] = {}) -> bool:
+CacheHeaders = dict[str, Optional[str]]
+
+
+async def check_needs_update(urls: list[str], _cache: dict[str, CacheHeaders] = {}) -> bool:
     """Raises RequestException"""
 
     if appconfig.CACHE_DIR:
         return True
 
-    async def get_headers(client: httpx.AsyncClient, url: str, *args: Any, **kwargs: Any) -> Tuple[str, httpx.Headers]:
-        r = await client.head(url, *args, **kwargs)
+    async def get_cache_headers(client: httpx.AsyncClient, url: str, timeout: float) -> tuple[str, CacheHeaders]:
+        """This tries to return the cache response headers for a given URL as cheap as possible"""
+
+        old_headers = _cache.get(url, {})
+        last_modified = old_headers.get("last-modified")
+        etag = old_headers.get("etag")
+        fetch_headers = {}
+        if last_modified is not None:
+            fetch_headers["if-modified-since"] = last_modified
+        if etag is not None:
+            fetch_headers["if-none-match"] = etag
+        r = await client.head(url, timeout=timeout, headers=fetch_headers)
+        if r.status_code == 304:
+            return (url, dict(old_headers))
         r.raise_for_status()
-        return (url, r.headers)
+        new_headers = {}
+        new_headers["last-modified"] = r.headers.get("last-modified")
+        new_headers["etag"] = r.headers.get("etag")
+        return (url, new_headers)
 
     needs_update = False
     async with httpx.AsyncClient(follow_redirects=True) as client:
         awaitables = []
         for url in urls:
-            awaitables.append(get_headers(client, url, timeout=REQUEST_TIMEOUT))
+            awaitables.append(get_cache_headers(client, url, timeout=REQUEST_TIMEOUT))
 
-        for url, headers in (await asyncio.gather(*awaitables)):
-            old = _cache.get(url)
-            new = headers.get("last-modified", "")
-            new += headers.get("etag", "")
-            if old != new:
+        for url, new_cache_headers in (await asyncio.gather(*awaitables)):
+            old_cache_headers = _cache.get(url, {})
+            if old_cache_headers != new_cache_headers:
                 needs_update = True
-            _cache[url] = new
+            _cache[url] = new_cache_headers
+
+    logger.info(f"check needs update: {urls!r} -> {needs_update!r}")
 
     return needs_update
 
@@ -335,9 +351,9 @@ async def update_source() -> None:
     if not await check_needs_update(urls):
         return
 
-    print("update source")
+    logger.info("update source")
 
-    final: Dict[str, Source] = {}
+    final: dict[str, Source] = {}
     awaitables = []
     for repo in get_repositories():
         awaitables.append(parse_repo(repo))
@@ -358,41 +374,71 @@ async def update_sourceinfos() -> None:
     if not await check_needs_update(urls):
         return
 
-    print("update sourceinfos")
-    result: Dict[str, SrcInfoPackage] = {}
+    logger.info("update sourceinfos")
+    result: dict[str, SrcInfoPackage] = {}
+    pkgextra = PkgExtra(packages={})
 
     for url in urls:
-        print("Loading %r" % url)
+        logger.info("Loading %r" % url)
         data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
         json_obj = json.loads(gzip.decompress(data).decode("utf-8"))
         for hash_, m in json_obj.items():
+            extra = m.get("extra", {})
+            pkgbase = None
             for repo, srcinfo in m["srcinfo"].items():
                 for pkg in SrcInfoPackage.for_srcinfo(srcinfo, repo, m["repo"], m["path"], m["date"]):
+                    pkgbase = pkg.pkgbase
                     if pkg.pkgname in result:
-                        print(f"WARN: duplicate: {pkg.pkgname} provided by "
-                              f"{pkg.pkgbase} and {result[pkg.pkgname].pkgbase}")
+                        logger.info(f"WARN: duplicate: {pkg.pkgname} provided by "
+                                    f"{pkg.pkgbase} and {result[pkg.pkgname].pkgbase}")
                     result[pkg.pkgname] = pkg
+            if pkgbase is not None:
+                pkgextra.packages[pkgbase] = extra_to_pkgextra_entry(extra)
+                if pkgbase == "autotools":
+                    print(pkgextra.packages[pkgbase])
 
+    state.pkgextra = pkgextra
     state.sourceinfos = result
+    await update_pypi_versions(pkgextra)
 
 
-async def update_pkgmeta() -> None:
-    urls = PKGMETA_URLS
+async def update_pypi_versions(pkgextra: PkgExtra) -> None:
+    urls = PYPI_URLS
     if not await check_needs_update(urls):
         return
 
-    print("update pkgmeta")
-    merged = PkgMeta(packages={})
+    projects = {}
     for url in urls:
-        print("Loading %r" % url)
+        logger.info("Loading %r" % url)
         data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
-        merged.packages.update(PkgMeta.parse_obj(yaml.safe_load(data)).packages)
+        json_obj = json.loads(gzip.decompress(data).decode("utf-8"))
+        projects.update(json_obj.get("projects", {}))
 
-    state.pkgmeta = merged
+    pypi_versions = {}
+    for entry in pkgextra.packages.values():
+        if "pypi" not in entry.references:
+            continue
+        pypi_name = entry.references["pypi"]
+        assert isinstance(pypi_name, str)
+        if pypi_name in projects:
+            project = projects[pypi_name]
+            info = project["info"]
+            project_urls = project.get("urls", [])
+            oldest_timestamp = 0
+            for url_entry in project_urls:
+                dt = datetime.datetime.fromisoformat(
+                    url_entry["upload_time_iso_8601"].replace("Z", "+00:00"))
+                timestamp = int(dt.timestamp())
+                if oldest_timestamp == 0 or timestamp < oldest_timestamp:
+                    oldest_timestamp = timestamp
+            pypi_versions[pypi_name] = ExtInfo(
+                pypi_name, info["version"], oldest_timestamp, info["project_url"], {})
+
+    state.set_ext_infos(ExtId("pypi", "PyPI", True), pypi_versions)
 
 
-def fill_rdepends(sources: Dict[str, Source]) -> None:
-    deps: Dict[str, Dict[Package, Set[DepType]]] = {}
+def fill_rdepends(sources: dict[str, Source]) -> None:
+    deps: dict[str, dict[Package, set[DepType]]] = {}
     for s in sources.values():
         for p in s.packages.values():
             for n, r in p.depends.items():
@@ -410,7 +456,7 @@ def fill_rdepends(sources: Dict[str, Source]) -> None:
             for prov in p.provides:
                 rdeps.append(deps.get(prov, dict()))
 
-            merged: Dict[Package, Set[DepType]] = {}
+            merged: dict[Package, set[DepType]] = {}
             for rd in rdeps:
                 for rp, rs in rd.items():
                     merged.setdefault(rp, set()).update(rs)
@@ -418,9 +464,9 @@ def fill_rdepends(sources: Dict[str, Source]) -> None:
             p.rdepends = merged
 
 
-def fill_provided_by(sources: Dict[str, Source]) -> None:
+def fill_provided_by(sources: dict[str, Source]) -> None:
 
-    provided_by: Dict[str, Set[Package]] = {}
+    provided_by: dict[str, set[Package]] = {}
     for s in sources.values():
         for p in s.packages.values():
             for provides in p.provides.keys():
@@ -434,7 +480,7 @@ def fill_provided_by(sources: Dict[str, Source]) -> None:
 _rate_limit = AsyncLimiter(UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _get_update_event() -> Event:
     return Event()
 
@@ -452,7 +498,7 @@ def queue_update() -> None:
 
 async def trigger_loop() -> None:
     while True:
-        print("Sleeping for %d" % UPDATE_INTERVAL)
+        logger.info("Sleeping for %d" % UPDATE_INTERVAL)
         await asyncio.sleep(UPDATE_INTERVAL)
         queue_update()
 
@@ -465,10 +511,9 @@ async def update_loop() -> None:
     task.add_done_callback(_background_tasks.discard)
     while True:
         async with _rate_limit:
-            print("check for updates")
+            logger.info("check for updates")
             try:
                 awaitables = [
-                    update_pkgmeta(),
                     update_cygwin_versions(),
                     update_arch_versions(),
                     update_source(),
@@ -477,10 +522,10 @@ async def update_loop() -> None:
                 ]
                 await asyncio.gather(*awaitables)
                 state.ready = True
-                print("done")
+                logger.info("done")
             except Exception:
                 traceback.print_exc(file=sys.stdout)
-        print("Waiting for next update")
+        logger.info("Waiting for next update")
         await wait_for_update()
         # XXX: it seems some updates don't propagate right away, so wait a bit
         await asyncio.sleep(5)
