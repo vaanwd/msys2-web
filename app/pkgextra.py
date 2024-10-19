@@ -8,9 +8,6 @@ from collections.abc import Sequence, Collection
 class PkgExtraEntry(BaseModel):
     """Extra metadata for a PKGBUILD"""
 
-    internal: bool = Field(default=False)
-    """If the package is MSYS2 internal or just a meta package"""
-
     references: dict[str, str | None] = Field(default_factory=dict)
     """References to third party repositories"""
 
@@ -31,6 +28,9 @@ class PkgExtraEntry(BaseModel):
 
     pgp_keys_url: str | None = Field(default=None)
     """A website containing which keys are used to sign releases"""
+
+    ignore_vulnerabilities: list[str] = Field(default_factory=list)
+    """List of CVEs or GHSAs that are either not relevant or not fixable"""
 
 
 class PkgExtra(BaseModel):

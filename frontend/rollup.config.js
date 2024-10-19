@@ -1,3 +1,4 @@
+import process from 'node:process';
 import resolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import terser from "@rollup/plugin-terser";
@@ -51,8 +52,8 @@ Dependencies:
     }),
     copy({
         targets: [
-          { src: 'node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff*', dest: '../app/static/fonts' },
-          { src: 'node_modules/@fontsource/roboto/files/roboto-latin-700-normal.woff*', dest: '../app/static/fonts' },
+          { src: 'node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff2', dest: '../app/static/fonts' },
+          { src: 'node_modules/@fontsource/roboto/files/roboto-latin-700-normal.woff2', dest: '../app/static/fonts' },
         ]
     }),
     !dev && getBabelOutputPlugin({

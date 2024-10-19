@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from collections.abc import Iterable
 from .appstate import state, SrcInfoPackage
 from .utils import extract_upstream_version, version_is_newer_than
-from .fetch import queue_update
+from .fetch.update import queue_update
 
 
 class QueueBuild(BaseModel):
@@ -301,12 +301,12 @@ async def outofdate(request: Request, response: Response) -> list[OutOfDateEntry
     to_update = []
 
     for s in state.sources.values():
-        if s.pkgextra.internal:
+        if "internal" in s.pkgextra.references:
             continue
 
         git_version = extract_upstream_version(s.git_version)
         info = s.upstream_info
-        if info is not None and info.version != "":
+        if info is not None and info.version is not None:
             if version_is_newer_than(info.version, git_version):
                 to_update.append(OutOfDateEntry(
                     name=s.name,

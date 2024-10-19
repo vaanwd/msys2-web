@@ -21,8 +21,7 @@ from fastapi_etag import Etag
 from fastapi.staticfiles import StaticFiles
 from fastapi_etag import add_exception_handler as add_etag_exception_handler
 
-from .appstate import state, get_repositories, Package, Source, DepType, SrcInfoPackage, get_base_group_name
-from .appconfig import DEFAULT_REPO
+from .appstate import state, get_repositories, Package, Source, DepType, SrcInfoPackage, get_base_group_name, Vulnerability, Severity, PackageKey
 from .utils import extract_upstream_version, version_is_newer_than
 
 router = APIRouter(default_response_class=HTMLResponse)
@@ -82,19 +81,27 @@ def update_timestamp(request: Request) -> float:
     return state.last_update
 
 
+@context_function("vulnerability_color")
+def vulnerability_color(request: Request, vuln: Vulnerability) -> str:
+    if vuln.severity == Severity.CRITICAL:
+        return "danger"
+    elif vuln.severity == Severity.HIGH:
+        return "warning"
+    else:
+        return "secondary"
+
+
 @context_function("package_url")
 def package_url(request: Request, package: Package, name: str | None = None) -> str:
     res: str = ""
     if name is None:
         res = str(request.url_for("package", package_name=name or package.name))
-        res += "?repo=" + package.repo
         if package.repo_variant:
-            res += "&variant=" + package.repo_variant
+            res += "?variant=" + package.repo_variant
     else:
         res = str(request.url_for("package", package_name=re.split("[<>=]+", name)[0]))
         if package.repo_variant:
-            res += "?repo=" + package.repo
-            res += "&variant=" + package.repo_variant
+            res += "?variant=" + package.repo_variant
     return res
 
 
@@ -187,6 +194,19 @@ def filter_filesize(d: int) -> str:
         return "%.2f MB" % (d / (1024 ** 2))
 
 
+@template_filter("group_by_repo")
+def group_by_repo(packages: dict[PackageKey, Package]) -> list[tuple[str, list[Package]]]:
+    res: dict[str, list[Package]] = {}
+    for _, p in sorted(packages.items()):
+        res.setdefault(p.repo, []).append(p)
+    sorted_res = []
+    for repo in get_repositories():
+        name = repo.name
+        if name in res:
+            sorted_res.append((name, res[name]))
+    return sorted_res
+
+
 @router.get('/robots.txt')
 async def robots() -> Response:
     data = """\
@@ -198,17 +218,17 @@ Disallow: /search?*
 
 @router.get('/repos', dependencies=[Depends(Etag(get_etag))])
 async def repos(request: Request, response: Response) -> Response:
-    return templates.TemplateResponse("repos.html", {"request": request, "repos": get_repositories()}, headers=dict(response.headers))
+    return templates.TemplateResponse(request, "repos.html", {"repos": get_repositories()}, headers=dict(response.headers))
 
 
 @router.get('/stats', dependencies=[Depends(Etag(get_etag))])
 async def stats(request: Request, response: Response) -> Response:
-    return templates.TemplateResponse("stats.html", {"request": request}, headers=dict(response.headers))
+    return templates.TemplateResponse(request, "stats.html", {}, headers=dict(response.headers))
 
 
 @router.get('/mirrors', dependencies=[Depends(Etag(get_etag))])
 async def mirrors(request: Request, response: Response) -> Response:
-    return templates.TemplateResponse("mirrors.html", {"request": request}, headers=dict(response.headers))
+    return templates.TemplateResponse(request, "mirrors.html", {}, headers=dict(response.headers))
 
 
 @router.get('/', dependencies=[Depends(Etag(get_etag))])
@@ -226,15 +246,32 @@ async def base(request: Request, response: Response, base_name: str | None = Non
             res = [state.sources[base_name]]
         else:
             res = []
-        return templates.TemplateResponse("base.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "base.html", {
             "sources": res,
-        }, headers=dict(response.headers))
+        }, status_code=200 if res else 404, headers=dict(response.headers))
     else:
-        return templates.TemplateResponse("baseindex.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "baseindex.html", {
             "sources": state.sources.values(),
         }, headers=dict(response.headers))
+
+
+@router.get('/security', dependencies=[Depends(Etag(get_etag))])
+async def security(request: Request, response: Response) -> Response:
+    global state
+
+    def sort_key(s: Source) -> tuple:
+        v: Vulnerability | None = s.worst_active_vulnerability
+        assert v is not None
+        return v.sort_key
+
+    return templates.TemplateResponse(request, "security.html", {
+        "vulnerable": sorted([s for s in state.sources.values() if s.worst_active_vulnerability is not None],
+                             key=sort_key,
+                             reverse=True),
+        "sources": state.sources.values(),
+        "known": [s for s in state.sources.values() if s.can_have_vulnerabilities],
+        "unknown": [s for s in state.sources.values() if not s.can_have_vulnerabilities],
+    }, headers=dict(response.headers))
 
 
 @router.get('/group/', dependencies=[Depends(Etag(get_etag))])
@@ -258,19 +295,17 @@ async def groups(request: Request, response: Response, group_name: str | None = 
                 if group_name in p.groups:
                     res.append(p)
 
-        return templates.TemplateResponse("group.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "group.html", {
             "name": group_name,
             "packages": res,
-        }, headers=dict(response.headers))
+        }, status_code=200 if res else 404, headers=dict(response.headers))
     else:
         groups: dict[str, int] = {}
         for s in state.sources.values():
             for k, p in sorted(s.packages.items()):
                 for name in p.groups:
                     groups[name] = groups.get(name, 0) + 1
-        return templates.TemplateResponse('groups.html', {
-            "request": request,
+        return templates.TemplateResponse(request, 'groups.html', {
             "groups": groups,
         }, headers=dict(response.headers))
 
@@ -289,11 +324,10 @@ async def basegroups(request: Request, response: Response, group_name: str | Non
                     if base_name == group_name:
                         groups[name] = groups.get(name, 0) + 1
 
-        return templates.TemplateResponse("basegroup.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "basegroup.html", {
             "name": group_name,
             "groups": groups,
-        }, headers=dict(response.headers))
+        }, status_code=200 if groups else 404, headers=dict(response.headers))
     else:
         base_groups: dict[str, set[str]] = {}
         for s in state.sources.values():
@@ -302,17 +336,23 @@ async def basegroups(request: Request, response: Response, group_name: str | Non
                     base_name = get_base_group_name(p, name)
                     base_groups.setdefault(base_name, set()).add(name)
 
-        return templates.TemplateResponse('basegroups.html', {
-            "request": request,
+        return templates.TemplateResponse(request, 'basegroups.html', {
             "base_groups": base_groups,
         }, headers=dict(response.headers))
 
 
 @router.get('/package/', dependencies=[Depends(Etag(get_etag))])
+async def packages_redir(request: Request, response: Response) -> Response:
+    return RedirectResponse(
+        request.url_for('packages').include_query_params(**request.query_params),
+        headers=dict(response.headers))
+
+
+@router.get('/packages/', dependencies=[Depends(Etag(get_etag))])
 async def packages(request: Request, response: Response, repo: str | None = None, variant: str | None = None) -> Response:
     global state
 
-    repo = repo or DEFAULT_REPO
+    repo = repo or get_repositories()[0].name
 
     packages = []
     for s in state.sources.values():
@@ -322,8 +362,7 @@ async def packages(request: Request, response: Response, repo: str | None = None
                     packages.append((s, p))
 
     repos = get_repositories()
-    return templates.TemplateResponse("packages.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "packages.html", {
         "packages": packages,
         "repos": repos,
         "repo_filter": repo,
@@ -331,6 +370,13 @@ async def packages(request: Request, response: Response, repo: str | None = None
 
 
 @router.get('/package/{package_name}', dependencies=[Depends(Etag(get_etag))])
+async def package_redir(request: Request, response: Response, package_name: str) -> Response:
+    return RedirectResponse(
+        request.url_for('package', package_name=package_name).include_query_params(**request.query_params),
+        headers=dict(response.headers))
+
+
+@router.get('/packages/{package_name}', dependencies=[Depends(Etag(get_etag))])
 async def package(request: Request, response: Response, package_name: str, repo: str | None = None, variant: str | None = None) -> Response:
     global state
 
@@ -347,17 +393,15 @@ async def package(request: Request, response: Response, package_name: str, repo:
                         else:
                             provides.append((s, p))
 
-    if packages:
-        return templates.TemplateResponse("package.html", {
-            "request": request,
-            "packages": packages,
-        }, headers=dict(response.headers))
-    else:
-        return templates.TemplateResponse("packagevirtual.html", {
-            "request": request,
+    if not packages and provides:
+        return templates.TemplateResponse(request, "packagevirtual.html", {
             "name": package_name,
             "packages": provides,
         }, headers=dict(response.headers))
+    else:
+        return templates.TemplateResponse(request, "package.html", {
+            "packages": packages,
+        }, status_code=200 if packages else 404, headers=dict(response.headers))
 
 
 @router.get('/updates', dependencies=[Depends(Etag(get_etag))])
@@ -374,8 +418,7 @@ async def updates(request: Request, response: Response, repo: str = "") -> Respo
             packages.append(p)
     packages.sort(key=lambda p: p.builddate, reverse=True)
 
-    return templates.TemplateResponse("updates.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "updates.html", {
         "packages": packages[:250],
         "repos": repos,
         "repo_filter": repo_filter,
@@ -427,7 +470,7 @@ async def outofdate(request: Request, response: Response, related: str | None = 
     for s in state.sources.values():
         all_sources.append(s)
 
-        if s.pkgextra.internal:
+        if "internal" in s.pkgextra.references:
             continue
 
         if related_depends:
@@ -446,7 +489,7 @@ async def outofdate(request: Request, response: Response, related: str | None = 
             git_version = ""
 
         info = s.upstream_info
-        if info is not None and info.version != "":
+        if info is not None and info.version is not None:
             if version_is_newer_than(info.version, msys_version):
                 to_update.append((s, msys_version, git_version, info.version, info.url, info.date))
         else:
@@ -458,8 +501,7 @@ async def outofdate(request: Request, response: Response, related: str | None = 
 
     missing.sort(key=lambda i: i.date, reverse=True)
 
-    return templates.TemplateResponse("outofdate.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "outofdate.html", {
         "all_sources": all_sources,
         "to_update": to_update,
         "missing": missing,
@@ -538,11 +580,21 @@ def get_status_priority(key: str) -> tuple[int, str]:
         return (-1, key)
 
 
-def repo_to_builds(repo: str) -> list[str]:
+def repo_to_build_type(repo: str) -> list[str]:
     if repo == "msys":
         return [repo, "msys-src"]
     else:
         return [repo, "mingw-src"]
+
+
+def get_build_types() -> list[str]:
+    build_types: list[str] = []
+    for r in get_repositories():
+        for build_type in repo_to_build_type(r.name):
+            if build_type in build_types:
+                build_types.remove(build_type)
+            build_types.append(build_type)
+    return build_types
 
 
 def get_build_status(srcinfo: SrcInfoPackage, build_types: set[str] = set()) -> list[PackageBuildStatus]:
@@ -568,7 +620,7 @@ def get_build_status(srcinfo: SrcInfoPackage, build_types: set[str] = set()) -> 
             )
 
     if not results:
-        for build in sorted(build_types):
+        for build in build_types:
             key = "unknown"
             results.append(
                 PackageBuildStatus(build, get_status_text(key), "", {}, get_status_category(key)))
@@ -590,10 +642,10 @@ async def queue(request: Request, response: Response, build_type: str = "") -> R
         for k, p in sorted(s.packages.items()):
             if p.name in state.sourceinfos:
                 srcinfo = state.sourceinfos[p.name]
-                if build_filter is not None and build_filter not in repo_to_builds(srcinfo.repo):
+                if build_filter is not None and build_filter not in repo_to_build_type(srcinfo.repo):
                     continue
                 if version_is_newer_than(srcinfo.build_version, p.version):
-                    srcinfo_repos.setdefault(srcinfo.pkgbase, set()).update(repo_to_builds(srcinfo.repo))
+                    srcinfo_repos.setdefault(srcinfo.pkgbase, set()).update(repo_to_build_type(srcinfo.repo))
                     repo_list = srcinfo_repos[srcinfo.pkgbase] if not build_filter else {build_filter}
                     new_src = state.sources.get(srcinfo.pkgbase)
                     grouped[srcinfo.pkgbase] = (srcinfo, new_src, p, get_build_status(srcinfo, repo_list))
@@ -601,7 +653,7 @@ async def queue(request: Request, response: Response, build_type: str = "") -> R
     # new packages
     available: dict[str, list[SrcInfoPackage]] = {}
     for srcinfo in state.sourceinfos.values():
-        if build_filter is not None and build_filter not in repo_to_builds(srcinfo.repo):
+        if build_filter is not None and build_filter not in repo_to_build_type(srcinfo.repo):
             continue
         available.setdefault(srcinfo.pkgname, []).append(srcinfo)
     for s in state.sources.values():
@@ -611,7 +663,7 @@ async def queue(request: Request, response: Response, build_type: str = "") -> R
     # only one per pkgbase
     for srcinfos in available.values():
         for srcinfo in srcinfos:
-            srcinfo_repos.setdefault(srcinfo.pkgbase, set()).update(repo_to_builds(srcinfo.repo))
+            srcinfo_repos.setdefault(srcinfo.pkgbase, set()).update(repo_to_build_type(srcinfo.repo))
             repo_list = srcinfo_repos[srcinfo.pkgbase] if not build_filter else {build_filter}
             src, pkg = None, None
             if srcinfo.pkgbase in grouped:
@@ -630,22 +682,17 @@ async def queue(request: Request, response: Response, build_type: str = "") -> R
     removals = []
     for s in state.sources.values():
         for k, p in s.packages.items():
-            if build_filter is not None and build_filter not in repo_to_builds(p.repo):
+            if build_filter is not None and build_filter not in repo_to_build_type(p.repo):
                 continue
             if p.name not in state.sourceinfos:
                 # FIXME: can also break things if it's the only provides and removed,
                 # and also is ok to remove if there is a replacement
-                removals.append((p, ", ".join([d.name for d in p.rdepends])))
+                removals.append((p, p.rdepends))
 
-    build_types = set()
-    for r in get_repositories():
-        build_types.update(repo_to_builds(r.name))
-
-    return templates.TemplateResponse("queue.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "queue.html", {
         "updates": updates,
         "removals": removals,
-        "build_types": build_types,
+        "build_types": get_build_types(),
         "build_filter": build_filter,
         "cycles": state.build_status.cycles,
     }, headers=dict(response.headers))
@@ -701,8 +748,7 @@ async def search(request: Request, response: Response, q: str = "", t: str = "")
                     res_pkg.append((score, sub))
         res_pkg.sort(key=lambda e: (-e[0], e[1].name.lower()))
 
-    return templates.TemplateResponse("search.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "search.html", {
         "results": res_pkg,
         "query": query,
         "qtype": qtype,

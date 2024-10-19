@@ -4,29 +4,45 @@ version = "0.1.0"
 description = ""
 authors = ["Christoph Reiter <reiter.christoph@gmail.com>"]
 license = "MIT"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.10"
-httpx = {extras = ["http2"], version = "^0.25.0"}
-fastapi = "^0.104.1"
-uvicorn = {extras = ["standard"], version = "^0.24.0"}
-aiofiles = "^23.1.0"
+httpx = {extras = ["http2"], version = "^0.27.0"}
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.31.0"}
 jinja2 = "^3.1.2"
 fastapi-etag = "^0.4.0"
-gunicorn = "^21.0.1"
+gunicorn = "^23.0.0"
 aiolimiter = "^1.0.0-beta.1"
 pydantic = "^2.0.3"
-zstandard = "^0.22.0"
+zstandard = "^0.23.0"
 MarkupSafe = "^2.1.1"
+uvicorn-worker = "^0.2.0"
 
 [tool.poetry.group.dev.dependencies]
-reuse = "^2.1.0"
-mypy = "1.7.1"
-flake8 = "^6.0.0"
-pytest = "^7.2.0"
+reuse = "^4.0.3"
+mypy = "1.11.2"
+flake8 = "^7.0.0"
+pytest = "^8.0.0"
 requests = "^2.23.0"
-respx = "^0.20.0"
+respx = "^0.21.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_no_return = true
+warn_return_any = true
+warn_unused_ignores = true
+strict_equality = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+filterwarnings = ["ignore::DeprecationWarning"]
+norecursedirs = ["frontend"]

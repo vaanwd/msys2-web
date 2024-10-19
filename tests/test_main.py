@@ -7,7 +7,7 @@ os.environ["NO_MIDDLEWARE"] = "1"
 import pytest
 from app import app
 from app.appstate import SrcInfoPackage, parse_packager
-from app.fetch import parse_cygwin_versions
+from app.fetch.cygwin import parse_cygwin_versions
 from app.utils import split_optdepends, strip_vcs, vercmp
 from app.pkgextra import extra_to_pkgextra_entry
 from fastapi.testclient import TestClient
@@ -24,16 +24,17 @@ def client():
     '', 'repos', 'base', 'group', 'groups', 'updates', 'outofdate', 'queue', 'new',
     'search', 'base/foo', 'group/foo', 'groups/foo', 'package/foo',
     'package', 'stats', 'mirrors', 'basegroups', 'basegroups/foo',
+    'packages', 'packages/foo',
 ])
 def test_main_endpoints(client, endpoint):
     r = client.get('/' + endpoint)
-    assert r.status_code == 200
+    assert r.status_code == (404 if "/" in endpoint else 200)
     assert "etag" in r.headers
     etag = r.headers["etag"]
     r = client.get('/' + endpoint, headers={"if-none-match": etag})
     assert r.status_code == 304
     r = client.get('/' + endpoint, headers={"if-none-match": "nope"})
-    assert r.status_code == 200
+    assert r.status_code == (404 if "/" in endpoint else 200)
 
 
 def test_parse_cygwin_versions():
@@ -211,8 +212,6 @@ def test_vercmp():
 
 
 def test_extra_to_pkgextra_entry():
-    assert extra_to_pkgextra_entry({"internal": "True"}).internal
-    assert not extra_to_pkgextra_entry({"internal": "false"}).internal
     assert extra_to_pkgextra_entry(
         {"references": ['foo: quux', 'bar']}
     ).references == {'foo': 'quux', 'bar': None}

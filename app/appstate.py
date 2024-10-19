@@ -13,6 +13,7 @@ from urllib.parse import quote_plus, quote
 from typing import NamedTuple, Any
 from collections.abc import Sequence
 from pydantic import BaseModel
+from dataclasses import dataclass
 
 from .appconfig import REPOSITORIES
 from .utils import vercmp, version_is_newer_than, extract_upstream_version, split_depends, \
@@ -31,7 +32,7 @@ class ExtId(NamedTuple):
 
 class ExtInfo(NamedTuple):
     name: str
-    version: str
+    version: str | None
     date: int
     url: str
     other_urls: dict[str, str]
@@ -158,6 +159,35 @@ class BuildStatus(BaseModel):
     cycles: list[tuple[str, str]] = []
 
 
+class Severity(Enum):
+
+    UNKNOWN = "unknown"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+    def __str__(self) -> str:
+        return self.value
+
+    @property
+    def sort_key(self) -> int:
+        return list(Severity).index(self)
+
+
+@dataclass
+class Vulnerability:
+
+    id: str
+    url: str
+    severity: Severity
+    ignored: bool = False
+
+    @property
+    def sort_key(self) -> tuple[bool, int, str, str]:
+        return (not self.ignored, self.severity.sort_key, self.id, self.url)
+
+
 class AppState:
 
     def __init__(self) -> None:
@@ -171,6 +201,7 @@ class AppState:
         self._pkgextra: PkgExtra = PkgExtra(packages={})
         self._ext_infos: dict[ExtId, dict[str, ExtInfo]] = {}
         self._build_status: BuildStatus = BuildStatus()
+        self._vulnerabilities: dict[str, list[Vulnerability]] = {}
         self._update_etag()
 
     def _update_etag(self) -> None:
@@ -232,11 +263,20 @@ class AppState:
         self._build_status = build_status
         self._update_etag()
 
+    @property
+    def vulnerabilities(self) -> dict[str, list[Vulnerability]]:
+        return self._vulnerabilities
+
+    @vulnerabilities.setter
+    def vulnerabilities(self, vulnerabilities: dict[str, list[Vulnerability]]) -> None:
+        self._vulnerabilities = vulnerabilities
+        self._update_etag()
+
 
 class Package:
 
     def __init__(self, builddate: str, csize: str, depends: list[str], filename: str, files: list[str], isize: str,
-                 makedepends: list[str], md5sum: str, name: str, pgpsig: str | None, sha256sum: str, arch: str,
+                 makedepends: list[str], md5sum: str | None, name: str, pgpsig: str | None, sha256sum: str, arch: str,
                  base_url: str, repo: str, repo_variant: str, package_prefix: str, base_prefix: str,
                  provides: list[str], conflicts: list[str], replaces: list[str],
                  version: str, base: str, desc: str, groups: list[str], licenses: list[str], optdepends: list[str],
@@ -350,6 +390,13 @@ class Package:
         return self.repo_url + ("/tree/master/" + quote(self.repo_path))
 
     @property
+    def source_only_tarball_url(self) -> str:
+        # assume the extension is the same as the package
+        ext_type = self.fileurl.rsplit(".", 1)[-1]
+        filename = f"{self.base}-{self.version}.src.tar.{ext_type}"
+        return self.fileurl.rsplit("/", 2)[0] + "/sources/" + quote(filename)
+
+    @property
     def key(self) -> PackageKey:
         return (self.repo, self.repo_variant,
                 self.name, self.arch, self.fileurl)
@@ -360,7 +407,7 @@ class Package:
                    d.get("%DEPENDS%", []), d["%FILENAME%"][0],
                    d.get("%FILES%", []), d["%ISIZE%"][0],
                    d.get("%MAKEDEPENDS%", []),
-                   d["%MD5SUM%"][0], d["%NAME%"][0],
+                   d.get("%MD5SUM%", [None])[0], d["%NAME%"][0],
                    d.get("%PGPSIG%", [None])[0], d["%SHA256SUM%"][0],
                    d["%ARCH%"][0], repo.download_url, repo.name, repo.variant,
                    repo.package_prefix, repo.base_prefix,
@@ -393,6 +440,38 @@ class Source:
     @property
     def _package(self) -> Package:
         return sorted(self.packages.items())[0][1]
+
+    @property
+    def all_vulnerabilities(self) -> list[Vulnerability]:
+        """Returns a list of vulnerabilities for the package, sorted by severity, highest first.
+        Also includes ignored vulnerabilities.
+        """
+        vulnerabilities = state.vulnerabilities.get(self.name, [])
+        for vuln in vulnerabilities:
+            vuln.ignored = vuln.id in self.pkgextra.ignore_vulnerabilities
+        return sorted(vulnerabilities, key=lambda v: v.sort_key, reverse=True)
+
+    @property
+    def active_vulnerabilities(self) -> list[Vulnerability]:
+        """Like all_vulnerabilities, but excludes ignored vulnerabilities"""
+        return [v for v in self.all_vulnerabilities if not v.ignored]
+
+    @property
+    def worst_active_vulnerability(self) -> Vulnerability | None:
+        """Returns the most severe vulnerability for the package, or None if there is none.
+        Ignored vulnerabilities are not considered.
+        """
+        for v in self.all_vulnerabilities:
+            if not v.ignored:
+                return v
+        return None
+
+    @property
+    def can_have_vulnerabilities(self) -> bool:
+        """If the package has the metadata required for vulnerabilities to be detected"""
+        references = self.pkgextra.references
+        # Roughly what our external scanner supports atm
+        return "pypi" in references or "purl" in references or "cpe" in references
 
     @property
     def repos(self) -> list[str]:
@@ -446,6 +525,8 @@ class Source:
         newest = None
         fallback = None
         for ext_id, info in self.external_infos:
+            if info.version is None:
+                continue
             if ext_id.fallback:
                 if fallback is None or version_is_newer_than(info.version, fallback.version):
                     fallback = info
@@ -455,9 +536,10 @@ class Source:
         return newest or fallback or None
 
     @property
-    def upstream_version(self) -> str:
+    def upstream_version(self) -> str | None:
+        """None of no version is available"""
         upstream_info = self.upstream_info
-        return upstream_info.version if upstream_info is not None else ""
+        return upstream_info.version if upstream_info is not None else None
 
     @property
     def pkgextra(self) -> PkgExtraEntry:
@@ -474,7 +556,7 @@ class Source:
         global state
 
         # internal package, don't try to link it
-        if self.pkgextra.internal:
+        if "internal" in self.pkgextra.references:
             return []
 
         ext = []
@@ -493,11 +575,28 @@ class Source:
                     ext.append((ext_id, infos[realname]))
                     break
 
+        # XXX: let repology do the mapping for us
+        repology_repo = "msys2_msys2" if self._package.repo == "msys" else "msys2_mingw"
+        ext.append((
+            ExtId("repology", "Repology", True),
+            ExtInfo(self.realname, None, 0,
+                    f"https://repology.org/tools/project-by?repo={quote(repology_repo)}&name_type=srcname&target_page=project_versions&name={quote(self.name)}", {})))
+
+        # XXX: let anitya do the searching for us, unless we have an ID
+        project_id = self.pkgextra.references.get("anitya", self.realname)
+        if project_id is not None:
+            ext.append((
+                ExtId("anitya", "Anitya", True),
+                ExtInfo(self.realname, None, 0,
+                        f"https://release-monitoring.org/project/{quote(project_id)}", {})))
+
         return sorted(ext)
 
     @property
-    def is_outdated(self) -> bool:
-        msys_version = extract_upstream_version(self.version)
+    def is_outdated_in_git(self) -> bool:
+        if self.upstream_version is None:
+            return False
+        msys_version = extract_upstream_version(self.git_version)
         return version_is_newer_than(self.upstream_version, msys_version)
 
     @property
@@ -537,6 +636,10 @@ class Source:
     def searchbug_url(self) -> str:
         return self.repo_url + (
             "/issues?q=" + quote_plus("is:issue is:open %s" % self.realname))
+
+    @property
+    def source_only_tarball_url(self) -> str:
+        return self._package.source_only_tarball_url
 
     @classmethod
     def from_desc(cls, d: dict[str, list[str]], repo: Repository) -> Source:

@@ -59,25 +59,33 @@
       <dd class="col-sm-9">{{ licenses_to_html(p.licenses)|safe }}</dd>
 
       <dt class="col-sm-3 text-sm-end">Version:</dt>
-      <dd class="col-sm-9">{{ p.version }}</dd>
+      <dd class="col-sm-9">{{ p.version }}{% if p.version != s.git_version %} <span class="text-muted small align-text-bottom ps-1">(<a href="{{ s.source_url }}">{{ s.git_version }}</a> in git)</span>{% endif %}</dd>
 
-      <dt class="col-sm-3 text-sm-end">GIT Version:</dt>
+      <dt class="col-sm-3 text-sm-end mb-2">External:</dt>
       <dd class="col-sm-9">
-        {% if s.git_version %}
-        <a href="{{ s.source_url }}">{{ s.git_version }}</a>
-        {% else %}
-        -
-        {% endif%}
+        <dl class="row mb-0">
+        {% for ext_id, info in s.external_infos %}
+          <dt class="text-muted small">{{ ext_id.name }}</dt>
+          <dd>
+            <a href="{{ info.url }}">{{ info.version or info.name }}</a>
+            {% for url, label in info.other_urls|dictsort %}
+            | <a href="{{ url }}">{{ label }}</a>
+            {% endfor %}
+          </dd>
+        {% endfor %}
+        </dl>
       </dd>
 
-      {% for ext_id, info in s.external_infos %}
-      <dt class="col-sm-3 text-sm-end">{{ ext_id.name }}:</dt>
-      <dd class="col-sm-9"><a href="{{ info.url }}">{{ info.version or info.name }}</a>
-          {% for url, label in info.other_urls|dictsort %}
-              | <a href="{{ url }}">{{ label }}</a>
-          {% endfor %}
-      </dd>
-    {% endfor %}
+    {% if s.all_vulnerabilities %}
+    <dt class="col-sm-3 text-sm-end">Vulnerabilities:</dt>
+    <dd class="col-sm-9">
+      <ul class="list-unstyled">
+        {% for vuln in s.all_vulnerabilities %}
+        <li {% if vuln.ignored %}style="text-decoration: line-through"{% endif %}><a href="{{ vuln.url }}">{{ vuln.id }}</a> <span class="opacity-75 text-{{vulnerability_color(vuln)}}">({{ vuln.severity }})</span></li>
+        {% endfor %}
+      </ul>
+    </dd>
+    {% endif%}
 
       <dt class="col-sm-3 text-sm-end"></dt>
       <dd class="col-sm-9"><hr></dd>
@@ -109,6 +117,9 @@
 
       <dt class="col-sm-3 text-sm-end">Installed Size:</dt>
       <dd class="col-sm-9">{{ p.isize|filesize }}</dd>
+
+      <dt class="col-sm-3 text-sm-end">Source-Only Tarball:</dt>
+      <dd class="col-sm-9"><a href="{{ p.source_only_tarball_url }}">{{ p.source_only_tarball_url }}</a></dd>
 
       <dt class="col-sm-3 text-sm-end"></dt>
       <dd class="col-sm-9"><hr></dd>
@@ -170,7 +181,7 @@
         {% if p.provides %}
             <ul class="list-unstyled">
                 {% for d, r in p.provides|dictsort %}
-                    <li><a href="{{ package_url(p, d) }}">{{ d }}</a> </li>
+                    <li><a href="{{ package_url(p, d) }}">{{ d }}</a>{% if r %} <span class="text-muted">{{ r|sort|join(', ') }}</span>{% endif %}</li>
                 {% endfor %}
             </ul>
         {% else %}
@@ -183,7 +194,7 @@
         {% if p.conflicts %}
             <ul class="list-unstyled">
                 {% for d, r in p.conflicts|dictsort %}
-                    <li><a href="{{ package_url(p, d) }}">{{ d }}</a></li>
+                    <li><a href="{{ package_url(p, d) }}">{{ d }}</a>{% if r %} <span class="text-muted">{{ r|sort|join(', ') }}</span>{% endif %}</li>
                 {% endfor %}
             </ul>
         {% else %}
@@ -196,7 +207,7 @@
         {% if p.replaces %}
             <ul class="list-unstyled">
                 {% for d, r in p.replaces|dictsort %}
-                    <li><a href="{{ package_url(p, d) }}">{{ d }}</a></li>
+                    <li><a href="{{ package_url(p, d) }}">{{ d }}</a>{% if r %} <span class="text-muted">{{ r|sort|join(', ') }}</span>{% endif %}</li>
                 {% endfor %}
             </ul>
         {% else %}

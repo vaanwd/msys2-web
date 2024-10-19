@@ -25,7 +25,7 @@
   </div>
   <div class="card-body overflow-auto">
 
-    {% if s.is_outdated %}
+    {% if s.is_outdated_in_git %}
     <small><div class="alert alert-secondary" role="alert">
       A <strong>newer upstream version ({{ s.upstream_version }})</strong>
       is available.<br>Consider packaging the new version for
@@ -50,15 +50,6 @@
         {% endfor %}
       </dd>
 
-      <dt class="col-sm-3 text-sm-end">Repo(s):</dt>
-      <dd class="col-sm-9">
-        {% for r in s.repos %}
-        {{ r }}{{ ", " if not loop.last else "" }}
-        {% else %}
-        -
-        {% endfor %}
-      </dd>
-
       {% for name, url in s.urls %}
       <dt class="col-sm-3 text-sm-end">{{ name }}:</dt>
       <dd class="col-sm-9">
@@ -74,36 +65,55 @@
       </dd>
 
       <dt class="col-sm-3 text-sm-end">Version:</dt>
-      <dd class="col-sm-9">{{ s.version }}</dd>
+      <dd class="col-sm-9">{{ s.version }}{% if s.version != s.git_version %} <span class="text-muted small align-text-bottom ps-1">(<a href="{{ s.source_url }}">{{ s.git_version }}</a> in git)</span>{% endif %}</dd>
 
-      <dt class="col-sm-3 text-sm-end">GIT Version:</dt>
+      <dt class="col-sm-3 text-sm-end mb-2">External:</dt>
       <dd class="col-sm-9">
-        {% if s.git_version %}
-        <a href="{{ s.source_url }}">{{ s.git_version }}</a>
-        {% else %}
-        -
-        {% endif%}
+        <dl class="row mb-0">
+        {% for ext_id, info in s.external_infos %}
+          <dt class="text-muted small">{{ ext_id.name }}</dt>
+          <dd>
+            <a href="{{ info.url }}">{{ info.version or info.name }}</a>
+            {% for url, label in info.other_urls|dictsort %}
+            | <a href="{{ url }}">{{ label }}</a>
+            {% endfor %}
+          </dd>
+        {% endfor %}
+        </dl>
       </dd>
 
-      {% for ext_id, info in s.external_infos %}
-        <dt class="col-sm-3 text-sm-end">{{ ext_id.name }}:</dt>
-        <dd class="col-sm-9"><a href="{{ info.url }}">{{ info.version or info.name }}</a>
-            {% for url, label in info.other_urls|dictsort %}
-                | <a href="{{ url }}">{{ label }}</a>
-            {% endfor %}
-        </dd>
-      {% endfor %}
+      <dt class="col-sm-3 text-sm-end">Vulnerabilities:</dt>
+      <dd class="col-sm-9">
+        {% if s.all_vulnerabilities %}
+        <ul class="list-unstyled">
+          {% for vuln in s.all_vulnerabilities %}
+          <li {% if vuln.ignored %}style="text-decoration: line-through"{% endif %}><a href="{{ vuln.url }}">{{ vuln.id }}</a> <span class="opacity-75 text-{{vulnerability_color(vuln)}}">({{ vuln.severity }})</span></li>
+          {% endfor %}
+        </ul>
+        {% elif not s.can_have_vulnerabilities %}
+        <span class="text-muted">Not enough metadata for vulnerability scanning</span>
+        {% else %}
+        -
+        {% endif %}
+      </dd>
 
       <dt class="col-sm-3 text-sm-end"></dt>
       <dd class="col-sm-9"><hr></dd>
 
-      <dt class="col-sm-3 text-sm-end">Binary Packages:</dt>
+      <dt class="col-sm-3 text-sm-end mb-2">Binary Packages:</dt>
       <dd class="col-sm-9">
-        <ul class="list-unstyled">
-          {% for k, p in s.packages|dictsort(false) %}
-          <li><a href="{{ package_url(p) }}">{{ p.name }}</a></li>
-          {% endfor %}
-        </ul>
+        <dl class="row mb-0">
+        {% for repo, packages in s.packages|group_by_repo %}
+          <dt class="text-muted small">{{ repo }}</dt>
+          <dd>
+            <ul class="list-unstyled mb-0">
+            {% for p in packages %}
+              <li><a href="{{ package_url(p) }}">{{ p.name }}</a></li>
+            {% endfor %}
+            </ul>
+          </dd>
+        {% endfor %}
+        </dl>
       </dd>
     </dl>
   </div>
