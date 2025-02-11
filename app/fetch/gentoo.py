@@ -21,7 +21,7 @@ async def update_gentoo_versions() -> None:
     data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
     gentoo_versions = await asyncio.to_thread(parse_gentoo_versions, data)
     # fallback, since parsing isn't perfect and we include unstable versions
-    state.set_ext_infos(ExtId("gentoo", "Gentoo", True), gentoo_versions)
+    state.set_ext_infos(ExtId("gentoo", "Gentoo", True, True), gentoo_versions)
 
 
 def parse_gentoo_versions(data: bytes) -> dict[str, ExtInfo]:
@@ -48,7 +48,7 @@ def parse_gentoo_versions(data: bytes) -> dict[str, ExtInfo]:
                     package_name = gentoo_name.split("/", 1)[1]
                     basename = name.rsplit("/", 1)[-1]
                     version = basename[len(package_name) + 1:].rsplit(".", 1)[0]
-                    packages.setdefault(gentoo_name, {})[version] = mtime
+                    packages.setdefault(gentoo_name, {})[version] = int(mtime)
 
     infos = {}
     for gentoo_name, versions in packages.items():

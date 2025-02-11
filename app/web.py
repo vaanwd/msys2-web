@@ -42,11 +42,22 @@ class PackageStatus(Enum):
 
 
 class PackageBuildStatus(NamedTuple):
-    type: str
-    status: str
+    build_type: str
+    status_key: str
     details: str
     urls: dict[str, str]
-    category: str
+
+    @property
+    def status_text(self) -> str:
+        return get_status_text(self.status_key)
+
+    @property
+    def category(self) -> str:
+        return get_status_category(self.status_key)
+
+    @property
+    def priority(self) -> tuple[int, str]:
+        return get_status_priority(self.status_key)
 
 
 async def get_etag(request: Request) -> str:
@@ -237,22 +248,40 @@ async def index(request: Request, response: Response) -> Response:
 
 
 @router.get('/base', dependencies=[Depends(Etag(get_etag))])
-@router.get('/base/{base_name}', dependencies=[Depends(Etag(get_etag))])
-async def base(request: Request, response: Response, base_name: str | None = None) -> Response:
+async def baseindex(request: Request, response: Response, repo: str | None = None) -> Response:
     global state
 
-    if base_name is not None:
-        if base_name in state.sources:
-            res = [state.sources[base_name]]
-        else:
-            res = []
-        return templates.TemplateResponse(request, "base.html", {
-            "sources": res,
-        }, status_code=200 if res else 404, headers=dict(response.headers))
+    repo_filter = repo or None
+    repos = get_repositories()
+
+    filtered: list[Source] = []
+    if repo_filter is None:
+        filtered = list(state.sources.values())
     else:
-        return templates.TemplateResponse(request, "baseindex.html", {
-            "sources": state.sources.values(),
-        }, headers=dict(response.headers))
+        for s in state.sources.values():
+            for p in s.packages.values():
+                if p.repo == repo_filter:
+                    filtered.append(s)
+                    break
+
+    return templates.TemplateResponse(request, "baseindex.html", {
+        "sources": filtered,
+        "repos": repos,
+        "repo_filter": repo_filter,
+    }, headers=dict(response.headers))
+
+
+@router.get('/base/{base_name}', dependencies=[Depends(Etag(get_etag))])
+async def base(request: Request, response: Response, base_name: str) -> Response:
+    global state
+
+    if base_name in state.sources:
+        res = [state.sources[base_name]]
+    else:
+        res = []
+    return templates.TemplateResponse(request, "base.html", {
+        "sources": res,
+    }, status_code=200 if res else 404, headers=dict(response.headers))
 
 
 @router.get('/security', dependencies=[Depends(Etag(get_etag))])
@@ -468,6 +497,9 @@ async def outofdate(request: Request, response: Response, related: str | None = 
     related_depends = get_transitive_depends(related_list)
 
     for s in state.sources.values():
+        if repo_filter is not None and repo_filter not in s.repos:
+            continue
+
         all_sources.append(s)
 
         if "internal" in s.pkgextra.references:
@@ -479,9 +511,6 @@ async def outofdate(request: Request, response: Response, related: str | None = 
                     break
             else:
                 continue
-
-        if repo_filter is not None and repo_filter not in s.repos:
-            continue
 
         msys_version = extract_upstream_version(s.version)
         git_version = extract_upstream_version(s.git_version)
@@ -564,13 +593,13 @@ def get_status_priority(key: str) -> tuple[int, str]:
         return (-1, key)
 
     order = [
-        PackageStatus.UNKNOWN,
         PackageStatus.FINISHED,
-        PackageStatus.MANUAL_BUILD_REQUIRED,
         PackageStatus.FINISHED_BUT_INCOMPLETE,
         PackageStatus.FINISHED_BUT_BLOCKED,
-        PackageStatus.WAITING_FOR_BUILD,
         PackageStatus.WAITING_FOR_DEPENDENCIES,
+        PackageStatus.WAITING_FOR_BUILD,
+        PackageStatus.UNKNOWN,
+        PackageStatus.MANUAL_BUILD_REQUIRED,
         PackageStatus.FAILED_TO_BUILD,
     ]
 
@@ -614,16 +643,14 @@ def get_build_status(srcinfo: SrcInfoPackage, build_types: set[str] = set()) -> 
                 continue
             results.append(
                 PackageBuildStatus(
-                    build_type, get_status_text(status_key),
-                    status.desc or "", status.urls,
-                    get_status_category(status_key))
+                    build_type, status_key,
+                    status.desc or "", status.urls)
             )
 
     if not results:
         for build in build_types:
-            key = "unknown"
             results.append(
-                PackageBuildStatus(build, get_status_text(key), "", {}, get_status_category(key)))
+                PackageBuildStatus(build, PackageStatus.UNKNOWN.value, "", {}))
 
     return results
 
@@ -675,7 +702,7 @@ async def queue(request: Request, response: Response, build_type: str = "") -> R
     updates: list[UpdateEntry] = []
     updates = list(grouped.values())
     updates.sort(
-        key=lambda i: (i[0].date, i[0].pkgbase, i[0].pkgname),
+        key=lambda i: (i[3][0].priority, i[0].date, i[0].pkgbase, i[0].pkgname),
         reverse=True)
 
     # get all packages in the pacman repo which are no in GIT
