@@ -5,19 +5,11 @@ import os
 os.environ["NO_MIDDLEWARE"] = "1"
 
 import pytest
-from app import app
 from app.appstate import SrcInfoPackage, parse_packager
 from app.fetch.cygwin import parse_cygwin_versions
+from app.fetch.pypi import extract_pypi_project_from_purl
 from app.utils import split_optdepends, strip_vcs, vercmp
 from app.pkgextra import extra_to_pkgextra_entry
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture
-def client():
-    os.environ["NO_UPDATE_THREAD"] = "1"
-    with TestClient(app) as client:
-        yield client
 
 
 @pytest.mark.parametrize("endpoint", [
@@ -214,7 +206,14 @@ def test_vercmp():
 def test_extra_to_pkgextra_entry():
     assert extra_to_pkgextra_entry(
         {"references": ['foo: quux', 'bar']}
-    ).references == {'foo': 'quux', 'bar': None}
+    ).references == {'foo': ['quux'], 'bar': [None]}
     assert extra_to_pkgextra_entry(
         {"changelog_url": "foo"}
     ).changelog_url == "foo"
+
+
+def test_extract_pypi_project_from_purl():
+    assert extract_pypi_project_from_purl("pkg:pypi/foo") == "foo"
+    assert extract_pypi_project_from_purl("pkg:pypi/django@1.11.1") == "django"
+    assert extract_pypi_project_from_purl("pkg:pypi/django?filename=Django-1.11.1.tar.gz") == "django"
+    assert extract_pypi_project_from_purl("pkg:cargo/rand@0.7.2") is None

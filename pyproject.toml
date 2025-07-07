@@ -10,19 +10,21 @@ package-mode = false
 python = "^3.10"
 httpx = {extras = ["http2"], version = "^0.28.1"}
 fastapi = "^0.115.0"
-uvicorn = {extras = ["standard"], version = "^0.34.0"}
+uvicorn = {extras = ["standard"], version = "^0.35.0"}
 jinja2 = "^3.1.2"
 fastapi-etag = "^0.4.0"
 gunicorn = "^23.0.0"
 aiolimiter = "^1.0.0-beta.1"
 pydantic = "^2.0.3"
-zstandard = "^0.23.0"
 MarkupSafe = "^3.0.2"
 uvicorn-worker = "^0.3.0"
+packageurl-python = "^0.17.0"
+pyzstd = "^0.17.0"
+mcp = "^1.10.1"
 
 [tool.poetry.group.dev.dependencies]
 reuse = "^5.0.2"
-mypy = "1.15.0"
+mypy = "1.16.1"
 flake8 = "^7.0.0"
 pytest = "^8.0.0"
 requests = "^2.23.0"
