@@ -8,7 +8,7 @@ import re
 import datetime
 from enum import Enum
 import urllib.parse
-from typing import Any, Optional, NamedTuple
+from typing import Any, NamedTuple
 from collections.abc import Callable
 
 import jinja2
@@ -21,7 +21,7 @@ from fastapi_etag import Etag
 from fastapi.staticfiles import StaticFiles
 from fastapi_etag import add_exception_handler as add_etag_exception_handler
 
-from .appstate import state, get_repositories, Package, Source, DepType, SrcInfoPackage, get_base_group_name, Vulnerability, Severity, PackageKey
+from .appstate import state, get_repositories, Package, Source, DepType, SrcInfoPackage, get_base_group_name, Vulnerability, PackageKey, find_packages
 from .utils import extract_upstream_version, version_is_newer_than
 
 router = APIRouter(default_response_class=HTMLResponse)
@@ -90,16 +90,6 @@ def is_endpoint(request: Request, endpoint: str) -> bool:
 @context_function("update_timestamp")
 def update_timestamp(request: Request) -> float:
     return state.last_update
-
-
-@context_function("vulnerability_color")
-def vulnerability_color(request: Request, vuln: Vulnerability) -> str:
-    if vuln.severity == Severity.CRITICAL:
-        return "danger"
-    elif vuln.severity == Severity.HIGH:
-        return "warning"
-    else:
-        return "secondary"
 
 
 @context_function("package_url")
@@ -286,19 +276,20 @@ async def base(request: Request, response: Response, base_name: str) -> Response
 
 
 @router.get('/security', dependencies=[Depends(Etag(get_etag))])
-async def security(request: Request, response: Response) -> Response:
+async def security(request: Request, response: Response, fix_only: bool = False) -> Response:
     def sort_key(s: Source) -> tuple:
         v: Vulnerability | None = s.worst_active_vulnerability
         assert v is not None
         return v.sort_key
 
     return templates.TemplateResponse(request, "security.html", {
-        "vulnerable": sorted([s for s in state.sources.values() if s.worst_active_vulnerability is not None],
+        "vulnerable": sorted([s for s in state.sources.values() if s.worst_active_vulnerability is not None and (not fix_only or s.has_unaffected_versions)],
                              key=sort_key,
                              reverse=True),
         "sources": state.sources.values(),
         "known": [s for s in state.sources.values() if s.can_have_vulnerabilities],
         "unknown": [s for s in state.sources.values() if not s.can_have_vulnerabilities],
+        "fix_only": fix_only,
     }, headers=dict(response.headers))
 
 
@@ -650,7 +641,7 @@ def get_build_status(srcinfo: SrcInfoPackage, build_types: set[str] = set()) -> 
 async def queue(request: Request, response: Response, build_type: str = "") -> Response:
     # Create entries for all packages where the version doesn't match
 
-    UpdateEntry = tuple[SrcInfoPackage, Optional[Source], Optional[Package], list[PackageBuildStatus]]
+    UpdateEntry = tuple[SrcInfoPackage, Source | None, Package | None, list[PackageBuildStatus]]
 
     build_filter = build_type or None
     srcinfo_repos: dict[str, set[str]] = {}
@@ -730,44 +721,10 @@ async def search(request: Request, response: Response, q: str = "", t: str = "")
     if qtype not in ["pkg", "binpkg"]:
         qtype = "pkg"
 
-    parts = query.split()
-    parts_lower = [p.lower() for p in parts]
-    res_pkg: list[tuple[float, Package | Source]] = []
-
-    def get_score(name: str, parts: list[str]) -> float:
-        score = 0.0
-        for part in parts:
-            if part not in name:
-                return -1
-            score += name.count(part) * len(part) / len(name)
-        return score
-
-    if not query:
-        pass
-    elif qtype == "pkg":
-        for s in state.sources.values():
-            score = get_score(s.realname.lower(), parts_lower)
-            if score >= 0:
-                res_pkg.append((score, s))
-                continue
-            score = get_score(s.name.lower(), parts_lower)
-            if score >= 0:
-                res_pkg.append((score, s))
-        res_pkg.sort(key=lambda e: (-e[0], e[1].name.lower()))
-    elif qtype == "binpkg":
-        for s in state.sources.values():
-            for sub in s.packages.values():
-                score = get_score(sub.realname.lower(), parts_lower)
-                if score >= 0:
-                    res_pkg.append((score, sub))
-                    continue
-                score = get_score(sub.name.lower(), parts_lower)
-                if score >= 0:
-                    res_pkg.append((score, sub))
-        res_pkg.sort(key=lambda e: (-e[0], e[1].name.lower()))
+    results = find_packages(query, qtype)
 
     return templates.TemplateResponse(request, "search.html", {
-        "results": res_pkg,
+        "results": results,
         "query": query,
         "qtype": qtype,
     }, headers=dict(response.headers))

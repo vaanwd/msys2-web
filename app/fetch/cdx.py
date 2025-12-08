@@ -29,10 +29,23 @@ def parse_cdx(data: bytes) -> dict[str, list[Vulnerability]]:
         for ratings in vuln["ratings"]:
             severity = Severity(ratings["severity"])
             break
+
+        unaffected_versions = []
+        for affects in vuln["affects"]:
+            versions = affects.get("versions", [])
+            for version in versions:
+                if version.get("status") == "unaffected" and "version" in version:
+                    unaffected_versions.append(version["version"])
+
+        ignored_states = {"resolved", "resolved_with_pedigree", "false_positive", "not_affected"}
+        ignored = "analysis" in vuln and vuln["analysis"].get("state") in ignored_states
+
         return Vulnerability(
             id=vuln["id"],
             url=vuln["source"]["url"],
-            severity=severity)
+            severity=severity,
+            ignored=ignored,
+            unaffected_versions=unaffected_versions)
 
     vuln_mapping: dict[str, list[Vulnerability]] = {}
     for vuln in cdx["vulnerabilities"]:
@@ -54,7 +67,7 @@ async def update_cdx() -> None:
     logger.info("update cdx")
     vuln_mapping = {}
     for url in urls:
-        logger.info("Loading %r" % url)
+        logger.info(f"Loading {url!r}")
         data = await get_content_cached(url, timeout=REQUEST_TIMEOUT)
         logger.info(f"Done: {url!r}")
         vuln_mapping.update(parse_cdx(data))

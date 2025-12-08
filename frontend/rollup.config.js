@@ -1,11 +1,8 @@
 import process from 'node:process';
-import resolve from '@rollup/plugin-node-resolve';
-import commonjs from '@rollup/plugin-commonjs';
-import terser from "@rollup/plugin-terser";
 import postcss from 'rollup-plugin-postcss';
 import postcssLogical from 'postcss-logical';
 import autoprefixer from 'autoprefixer';
-import replace from '@rollup/plugin-replace';
+import {replacePlugin} from 'rolldown/plugins';
 import copy from 'rollup-plugin-copy'
 import license from 'rollup-plugin-license';
 import {getBabelOutputPlugin} from '@rollup/plugin-babel';
@@ -17,17 +14,22 @@ export default {
   output: {
     file: '../app/static/index.js',
     format: 'es',
+    minify: !dev,
   },
   plugins: [
-    resolve(),
-    commonjs(),
-    replace({
-        preventAssignment: true,
-        'process.env.NODE_ENV': JSON.stringify('production'),
+    replacePlugin({
+      'process.env.NODE_ENV': JSON.stringify('production'),
+    }, {
+      preventAssignment: true,
     }),
     postcss({
       extract: 'index.css',
       minimize: true,
+      use: {
+        sass: {
+          silenceDeprecations: ['import', 'color-functions', 'global-builtin', 'legacy-js-api']
+        }
+      },
       plugins: [
         postcssLogical(),
         autoprefixer(),
@@ -69,6 +71,5 @@ Dependencies:
             }
         ]],
     }),
-    !dev && terser(),
   ],
 };
