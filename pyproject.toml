@@ -7,28 +7,28 @@ requires-python = ">=3.11.0,<4.0"
 license = "MIT"
 dependencies = [
     "httpx[http2]>=0.28.1,<0.29",
-    "fastapi>=0.123.0,<0.124",
-    "uvicorn>=0.38.0,<0.39",
+    "fastapi>=0.131.0,<0.132",
+    "uvicorn>=0.41.0,<0.42",
     "jinja2>=3.1.2,<4",
     "fastapi-etag>=0.4.0,<0.5",
-    "gunicorn>=23.0.0,<24",
+    "gunicorn>=25.0.0,<26",
     "aiolimiter>=1.0.0,<2",
     "pydantic>=2.0.3,<3",
     "MarkupSafe>=3.0.2,<4",
     "uvicorn-worker>=0.4.0,<0.5",
     "packageurl-python>=0.17.0,<0.18",
-    "pyzstd>=0.18.0,<0.19; python_version < '3.14'",
+    "backports-zstd>=1.2.0,<2.0.0; python_version < '3.14'",
     "mcp>=1.10.1,<2",
 ]
 
 [dependency-groups]
 dev = [
     "reuse>=6.0.0,<7",
-    "mypy==1.19.0",
-    "flake8>=7.0.0,<8",
+    "mypy==1.19.1",
     "pytest>=8.0.0,<10",
     "requests>=2.23.0,<3",
     "respx>=0.22.0,<0.23",
+    "ruff>=0.15.0,<0.16.0",
 ]
 
 [tool.poetry]
@@ -55,3 +55,11 @@ disallow_untyped_defs = true
 [tool.pytest.ini_options]
 filterwarnings = ["ignore::DeprecationWarning"]
 norecursedirs = ["frontend"]
+
+[tool.ruff]
+line-length = 100
+exclude = ["frontend", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E741"]
