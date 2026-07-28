@@ -4,8 +4,8 @@
 import asyncio
 import functools
 import sys
+import time
 import traceback
-from asyncio import Event
 
 from aiolimiter import AsyncLimiter
 
@@ -26,19 +26,21 @@ _rate_limit = AsyncLimiter(UPDATE_MIN_RATE, UPDATE_MIN_INTERVAL)
 
 
 @functools.cache
-def _get_update_event() -> Event:
-    return Event()
+def _get_update_queue() -> asyncio.Queue[None]:
+    return asyncio.Queue(maxsize=1)
 
 
 async def wait_for_update() -> None:
-    update_event = _get_update_event()
-    await update_event.wait()
-    update_event.clear()
+    update_queue = _get_update_queue()
+    await update_queue.get()
 
 
 def queue_update() -> None:
-    update_event = _get_update_event()
-    update_event.set()
+    update_queue = _get_update_queue()
+    try:
+        update_queue.put_nowait(None)
+    except asyncio.QueueFull:
+        pass
 
 
 async def trigger_loop() -> None:
@@ -46,6 +48,7 @@ async def trigger_loop() -> None:
         logger.info(f"Sleeping for {UPDATE_INTERVAL}")
         await asyncio.sleep(UPDATE_INTERVAL)
         queue_update()
+
 
 _background_tasks = set()
 
@@ -58,22 +61,28 @@ async def update_loop() -> None:
         async with _rate_limit:
             logger.info("check for updates")
             try:
+                t0 = time.monotonic()
                 awaitables = []
                 if not appconfig.NO_EXTERN:
-                    awaitables.extend([
-                        update_cygwin_versions(),
-                        update_gentoo_versions(),
-                        update_arch_versions(),
-                    ])
-                awaitables.extend([
-                    update_source(),
-                    update_sourceinfos(),
-                    update_build_status(),
-                    update_cdx(),
-                ])
+                    awaitables.extend(
+                        [
+                            update_cygwin_versions(),
+                            update_gentoo_versions(),
+                            update_arch_versions(),
+                        ]
+                    )
+                awaitables.extend(
+                    [
+                        update_source(),
+                        update_sourceinfos(),
+                        update_build_status(),
+                        update_cdx(),
+                    ]
+                )
                 await asyncio.gather(*awaitables)
                 state.ready = True
-                logger.info("done")
+                elapsed = time.monotonic() - t0
+                logger.info(f"done in {elapsed:.1f}s")
             except Exception:
                 traceback.print_exc(file=sys.stdout)
         logger.info("Waiting for next update")

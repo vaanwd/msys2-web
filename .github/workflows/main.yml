@@ -2,17 +2,23 @@ name: test
 
 on: [push, pull_request, workflow_dispatch]
 
+permissions: {}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13', '3.14']
+        python-version: ['3.12', '3.13', '3.14']
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        persist-credentials: false
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -22,7 +28,7 @@ jobs:
     - name: Lint
       run: |
         uv run ruff check
-        uv run mypy .
+        uv run ty check
         uv run reuse lint
     - name: Test
       run: |
@@ -36,7 +42,9 @@ jobs:
     runs-on: ubuntu-latest
     if: (github.repository == 'msys2/msys2-web' && github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Log in
         run: |
           echo "$TOKEN" | docker login ghcr.io --username "$USERNAME" --password-stdin

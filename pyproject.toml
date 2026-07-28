@@ -3,31 +3,30 @@ name = "msys2-web"
 version = "0.1.0"
 description = ""
 authors = [{ name = "Christoph Reiter", email = "reiter.christoph@gmail.com" }]
-requires-python = ">=3.11.0,<4.0"
+requires-python = ">=3.12.0,<4.0"
 license = "MIT"
 dependencies = [
-    "httpx[http2]>=0.28.1,<0.29",
-    "fastapi>=0.131.0,<0.132",
-    "uvicorn>=0.41.0,<0.42",
+    "httpx2[http2]>=2.3.0,<3",
+    "fastapi>=0.139.0,<0.140",
+    "uvicorn>=0.51.0,<0.52",
     "jinja2>=3.1.2,<4",
     "fastapi-etag>=0.4.0,<0.5",
-    "gunicorn>=25.0.0,<26",
+    "gunicorn>=26.0.0,<27",
     "aiolimiter>=1.0.0,<2",
     "pydantic>=2.0.3,<3",
     "MarkupSafe>=3.0.2,<4",
     "uvicorn-worker>=0.4.0,<0.5",
     "packageurl-python>=0.17.0,<0.18",
     "backports-zstd>=1.2.0,<2.0.0; python_version < '3.14'",
-    "mcp>=1.10.1,<2",
 ]
 
 [dependency-groups]
 dev = [
     "reuse>=6.0.0,<7",
-    "mypy==1.19.1",
+    "ty>=0.0.27",
     "pytest>=8.0.0,<10",
     "requests>=2.23.0,<3",
-    "respx>=0.22.0,<0.23",
+    "respx>=0.23.0,<0.24",
     "ruff>=0.15.0,<0.16.0",
 ]
 
@@ -36,21 +35,14 @@ package-mode = false
 
 [tool.uv]
 package = false
+exclude-newer = "3 days"
 
 [build-system]
-requires = ["uv_build>=0.9.3,<0.10.0"]
+requires = ["uv_build>=0.9.3,<0.12.0"]
 build-backend = "uv_build"
 
-[tool.mypy]
-python_version = "3.11"
-ignore_missing_imports = true
-warn_no_return = true
-warn_return_any = true
-warn_unused_ignores = true
-strict_equality = true
-disallow_incomplete_defs = true
-disallow_untyped_calls = true
-disallow_untyped_defs = true
+[tool.ty.environment]
+python-version = "3.14"
 
 [tool.pytest.ini_options]
 filterwarnings = ["ignore::DeprecationWarning"]
@@ -59,6 +51,7 @@ norecursedirs = ["frontend"]
 [tool.ruff]
 line-length = 100
 exclude = ["frontend", ".venv"]
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
