@@ -133,7 +133,7 @@ SigLevel = Never</code></pre>
       <h4 class="card-title">Pending Package Removals</h4>
       <h6 class="card-subtitle mb-2 text-muted">
         {{ removals|length }} packages which are in the pacman repository, but no
-        longer in the Git repository and can be removed
+        longer in the Git repository
       </h6>
     </div>
     <div class="card-body overflow-auto">
@@ -147,7 +147,7 @@ SigLevel = Never</code></pre>
           </tr>
         </thead>
         <tbody>
-            {% for p, rdepends in removals %}
+            {% for p, blockers, removable_rdepends in removals %}
              <tr>
               <td class="mytooltip">
                   <a href="{{ p.history_url }}">{{ (p.builddate|timestamp).split()[0] }}</a>
@@ -157,13 +157,21 @@ SigLevel = Never</code></pre>
               </td>
               <td>{{ p.repo }}</td>
               <td><a href="{{ package_url(p) }}">{{ p.name }}</a></td>
-              {% if rdepends %}
-                <td><span class="text-danger">Required by:</span>
+              {% if blockers or removable_rdepends %}
+                <td>
+                    {% for rdepends, color, label in [
+                        (blockers, 'danger', 'Required by:'),
+                        (removable_rdepends, 'warning-emphasis', 'Required by (also removable):')
+                    ] %}
+                    {% if rdepends %}
+                    <span class="text-{{ color }}">{{ label }}</span>
                     <ul class="list-unstyled">
                     {% for rp, r in rdepends|rdepends_sort %}
                         <li><a href="{{ package_url(rp) }}">{{ rp.name }}</a>{% if r|rdepends_type %} <span class="text-muted">({{ r|rdepends_type|sort|join(', ') }})</span>{% endif %}</li>
                     {% endfor %}
                     </ul>
+                    {% endif %}
+                    {% endfor %}
                 </td>
               {% else %}
                 <td class="text-success">Ready for removal</td>

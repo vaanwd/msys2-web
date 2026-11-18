@@ -1,10 +1,10 @@
-from fastapi import FastAPI, APIRouter, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, Request, Response, Depends, Query
 from fastapi.responses import JSONResponse
 from fastapi_etag import Etag
 from pydantic import BaseModel
 
 from collections.abc import Iterable
-from .appstate import state, SrcInfoPackage
+from .appstate import state, SrcInfoPackage, get_removable_packages
 from .utils import extract_upstream_version, version_is_newer_than
 from .fetch.update import queue_update
 
@@ -235,21 +235,17 @@ async def buildqueue2(request: Request, response: Response) -> list[QueueEntry]:
 
 
 @router.get("/removals")
-async def removals(request: Request, response: Response) -> Response:
-    # get all packages in the pacman repo which are no in GIT
-    entries = []
-    for s in state.sources.values():
-        for k, p in s.packages.items():
-            # FIXME: can also break things if it's the only provides and removed,
-            # and also is ok to remove if there is a replacement
-            if p.name not in state.sourceinfos and not p.rdepends:
-                entries.append(
-                    {
-                        "repo": p.repo,
-                        "name": p.name,
-                    }
-                )
-    return JSONResponse(entries)
+async def removals(
+    request: Request,
+    response: Response,
+    recursive: bool = Query(
+        False,
+        description="Include packages whose reverse dependencies can also be removed together.",
+    ),
+) -> Response:
+    return JSONResponse(
+        [{"repo": p.repo, "name": p.name} for p in get_removable_packages(recursive)]
+    )
 
 
 @router.get("/search")

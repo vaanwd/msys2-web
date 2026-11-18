@@ -2,11 +2,18 @@
 # SPDX-License-Identifier: MIT
 
 import json
+from urllib.parse import unquote
 
 from ..appconfig import CDX_URLS, REQUEST_TIMEOUT
 from ..appstate import Severity, Vulnerability, state
 from ..utils import logger
 from .utils import check_needs_update, get_content_cached
+
+
+def _format_version_range(value: str) -> str:
+    if value.startswith("vers:") and "/" in value:
+        value = value.split("/", 1)[1]
+    return "|".join(unquote(constraint) for constraint in value.split("|"))
 
 
 def parse_cdx(data: bytes) -> dict[str, list[Vulnerability]]:
@@ -24,18 +31,20 @@ def parse_cdx(data: bytes) -> dict[str, list[Vulnerability]]:
         bom_ref = component["bom-ref"]
         mapping[bom_ref] = pkgbases
 
-    def parse_vuln(vuln: dict) -> Vulnerability:
+    def parse_vuln(vuln: dict, affected: dict) -> Vulnerability:
         severity = Severity.UNKNOWN
         for ratings in vuln["ratings"]:
             severity = Severity(ratings["severity"])
             break
 
         unaffected_versions = []
-        for affects in vuln["affects"]:
-            versions = affects.get("versions", [])
-            for version in versions:
-                if version.get("status") == "unaffected" and "version" in version:
-                    unaffected_versions.append(version["version"])
+        for version in affected.get("versions", []):
+            if version.get("status") != "unaffected":
+                continue
+            if "version" in version:
+                unaffected_versions.append(version["version"])
+            elif "range" in version:
+                unaffected_versions.append(_format_version_range(version["range"]))
 
         ignored_states = {"resolved", "resolved_with_pedigree", "false_positive", "not_affected"}
         ignored = "analysis" in vuln and vuln["analysis"].get("state") in ignored_states
@@ -53,7 +62,7 @@ def parse_cdx(data: bytes) -> dict[str, list[Vulnerability]]:
         for affected in vuln["affects"]:
             bom_ref = affected["ref"]
             pkgbases = mapping[bom_ref]
-            parsed_vuln = parse_vuln(vuln)
+            parsed_vuln = parse_vuln(vuln, affected)
             for pkgbase in pkgbases:
                 vuln_mapping.setdefault(pkgbase, []).append(parsed_vuln)
 

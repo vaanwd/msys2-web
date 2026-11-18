@@ -24,6 +24,7 @@ from fastapi_etag import add_exception_handler as add_etag_exception_handler
 from .appstate import (
     state,
     get_repositories,
+    get_removable_packages,
     Package,
     Source,
     DepType,
@@ -811,7 +812,7 @@ async def queue(request: Request, response: Response, build_type: str = "") -> R
         key=lambda i: (i[3][0].priority, i[0].date, i[0].pkgbase, i[0].pkgname), reverse=True
     )
 
-    # get all packages in the pacman repo which are no in GIT
+    removable = set(get_removable_packages(recursive=True))
     removals = []
     for s in state.sources.values():
         for k, p in s.packages.items():
@@ -820,7 +821,11 @@ async def queue(request: Request, response: Response, build_type: str = "") -> R
             if p.name not in state.sourceinfos:
                 # FIXME: can also break things if it's the only provides and removed,
                 # and also is ok to remove if there is a replacement
-                removals.append((p, p.rdepends))
+                blockers = {rp: types for rp, types in p.rdepends.items() if rp not in removable}
+                removable_rdepends = {
+                    rp: types for rp, types in p.rdepends.items() if rp in removable
+                }
+                removals.append((p, blockers, removable_rdepends))
 
     return templates.TemplateResponse(
         request,
